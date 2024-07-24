@@ -1,0 +1,64 @@
+import yaml
+import torch
+from dataclasses import dataclass, asdict
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class DataConfig:
+    dataset_name: str = "HuggingFaceFW/fineweb-edu"
+    split_ratio: float = .98
+    output_dir: str =  "datasets/fineweb" 
+    remote_name: str = "sample-10BT"
+    shard_size:int = int(1e8)
+
+@dataclass
+class ConfigHandler:
+    micro_batch_size: int
+    batch_size: int
+    n_embd: int
+    n_head: int
+    n_layer: int
+    seq_len: int
+    lr: float
+    embd_pdrop: float
+    attn_pdrop: float
+    resid_pdrop: float
+    eval_inter: int
+    eval_iter: int
+    max_iter: int
+    n_blocks: int
+    dtype: str
+    ckpt_dir: str
+    ckpt_model: str
+    ckpt_config: str
+    tokenized_data_path: str
+    tokenizer_type: str
+    vocab_size: int
+    device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+    @staticmethod
+    def from_dict(obj: dict) -> 'ConfigHandler':
+        return ConfigHandler(**obj)
+
+    def to_dict(self) -> dict: 
+        return asdict(self)
+    
+    def save(self, filepath: str):
+        try:
+            with open(filepath, 'w') as f: 
+                yaml.dump(self.to_dict(), f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+
+    @staticmethod
+    def load(filepath: str) -> 'ConfigHandler': 
+        logger.info(filepath)
+        try:
+            with open(filepath, 'r') as f:
+                config_dict = yaml.safe_load(f)
+            return ConfigHandler.from_dict(config_dict)
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            raise
