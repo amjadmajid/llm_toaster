@@ -5,7 +5,7 @@ import argparse
 from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
 from llm_model import TransformerModel
 from config import ConfigHandler
-from utils import load_model
+from utils import load_model_weights_
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +22,7 @@ def inference(config, model, prompt):
         print(f"Input truncated to the last {config.seq_len} tokens.")
     
     with torch.no_grad():
-        output = model.generate(input_ids, max_length=50)
+        output = model.generate(input_ids, max_length=35)
     generated_text = gpt2_decode(output[0].cpu().tolist())
     print(generated_text)
 
@@ -56,24 +56,8 @@ if __name__ == "__main__":
         n_blocks=config.n_blocks
     ).to(config.device)
 
-    # Load the model state dictionary
-    try:
-        # Load the saved state dictionary
-        model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
-        state_dict = torch.load(model_pth , map_location=config.device)
-
-        # Remove the "_orig_mod." prefix if it exists
-        new_state_dict = {key.replace("_orig_mod.", ""): value for key, value in state_dict.items()}
-
-        # Load the modified state dictionary into the model
-        model.load_state_dict(new_state_dict)
-
-        # Optionally, compile the model
-        model = torch.compile(model)
-
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        exit(1)
+    model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
+    load_model_weights_(model, model_pth, config.device)
 
     # Run inference with the initial prompt
     prompt = initial_prompt

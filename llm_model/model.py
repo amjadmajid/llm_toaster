@@ -57,13 +57,15 @@ class TransformerModel(nn.Module):
         logits = self.output_layer(x)
         return logits
     
-    def generate(self, start_indices, max_length):
+
+    def generate(self, start_indices, max_length, topk=35):
         """
         Generate text using the model.
 
         Args:
             start_indices (torch.Tensor): Starting indices for generation.
             max_length (int): Maximum length of the generated sequence.
+            topk (int): Number of top probabilities to sample from.
 
         Returns:
             torch.Tensor: Generated token indices.
@@ -71,12 +73,27 @@ class TransformerModel(nn.Module):
         self.eval()
         generated_indices = start_indices
         for _ in range(max_length):
+            # Get the logits from the model
             logits = self(generated_indices[:, -self.seq_len:])
+            
+            # Apply softmax to get probabilities
             probabilities = torch.softmax(logits[:, -1, :], dim=-1)
-            next_index = torch.multinomial(probabilities, num_samples=1)
+            
+            # Perform top-k sampling
+            topk_p, topk_i = torch.topk(probabilities, topk, dim=-1)
+            
+            # Sample from the top-k probabilities
+            next_index = torch.multinomial(topk_p, num_samples=1)
+            
+            # Gather the actual token indices
+            next_index = torch.gather(topk_i, 1, next_index)
+            
+            # Append the sampled token to the generated sequence
             generated_indices = torch.cat((generated_indices, next_index), dim=1)
+        
         self.train()
         return generated_indices
+
 
 class TransformerBlock(nn.Module):
     """

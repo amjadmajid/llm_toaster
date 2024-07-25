@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 import time
 
-from utils import evaluate_model, save_model, count_parameters, load_model
+from utils import evaluate_model, save_model, count_parameters, load_model_weights_
 from dataspace import DataLoaderLite
 from config import ConfigHandler
 from llm_model import TransformerModel
@@ -56,7 +56,7 @@ def train(continue_training, config):
     if continue_training:
         # load checkpointed configuration and model weights
         config = ConfigHandler.load(config.ckpt_dir+"/"+config.ckpt_config)
-        load_model(model, config.ckpt_dir+"/"+config.ckpt_model, config.device)
+        load_model_weights_(model, config.ckpt_dir+"/"+config.ckpt_model, config.device)
         logger.info("Loaded model's weights")
 
     start_time = time.time()

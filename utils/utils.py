@@ -31,7 +31,7 @@ def save_model(model, path):
     except Exception as e:
         logger.error(f"Error saving model: {e}")
 
-def load_model(model, path, device):
+def load_model_weights_(model, path, device, compile_f=True):
     """
     Load the model from a file.
 
@@ -40,11 +40,33 @@ def load_model(model, path, device):
         path (str): Path to the file.
         device (str): Device to load the model onto.
     """
+    # try:
+    #     model.load_state_dict(torch.load(path, map_location=device))
+    #     logger.info(f"Model loaded from {path}")
+    # except Exception as e:
+    #     logger.error(f"Error loading model: {e}")
+
+        # Load the model state dictionary
     try:
-        model.load_state_dict(torch.load(path, map_location=device))
-        logger.info(f"Model loaded from {path}")
+        # Load the saved state dictionary
+        
+        state_dict = torch.load(path , map_location=device)
+
+        # Remove the "_orig_mod." prefix if it exists
+        new_state_dict = {key.replace("_orig_mod.", ""): value for key, value in state_dict.items()}
+
+        # Load the modified state dictionary into the model
+        model.load_state_dict(new_state_dict)
+
+        # Optionally, compile the model
+        if compile_f and "cuda" in device:
+            model = torch.compile(model)
+
     except Exception as e:
         logger.error(f"Error loading model: {e}")
+        exit(1)
+
+        
 
 def evaluate_model(model, dataset, criterion, config):
     """
