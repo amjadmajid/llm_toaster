@@ -4,47 +4,67 @@ import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 import multiprocessing as mp
-from dataclasses import dataclass
 import logging
 from pathlib import Path
 from config import DataConfig
-
-# Add the parent directory to the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from tokenizer_lib import init_gpt2_tokenizer, gpt2_encode_hf
 
-
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 def _reset_names(root_dir, shard, split_name):
-    """This helper function resets shards names."""
+    """
+    Reset shard names to include the split name.
+    
+    Args:
+    - root_dir (str): Root directory containing the shards.
+    - shard (str): Name of the shard file.
+    - split_name (str): New split name to include in the shard file name.
+    """
     new_shard = shard.split('_')
     new_shard = f'{new_shard[0]}_{new_shard[1]}_{split_name}.npy'
     os.rename(Path(root_dir) / shard, Path(root_dir) / new_shard)
 
 def val_shards(data_root, split_ratio):
+    """
+    Create validation shards by renaming a portion of training shards.
+    
+    Args:
+    - data_root (str): Directory containing the data shards.
+    - split_ratio (float): Ratio of data to use for training; remainder is for validation.
+    """
     logger.info("Creating the validation shards...")
     shards = sorted(os.listdir(data_root))
     shards = [_reset_names(data_root, s, "train") if "val" in s else s  
               for s in shards if s.endswith('.npy')]
-    
-    n_shard = len(shards)
 
+    n_shard = len(shards)
     val_shards = max(1, int(n_shard * (1 - split_ratio)))
-    # Rename the shards files from "shard_{shard_index:06d}_train.npy" to "shard_{shard_index:06d}_val.npy"
+
     for i in range(val_shards):
         old_name = Path(data_root) / f"shard_{i:06d}_train.npy"
         new_name = Path(data_root) / f"shard_{i:06d}_val.npy"
         os.rename(old_name, new_name)
-    logging.info(f"Renamed {val_shards} shards to validation set.")
-
+    logger.info(f"Renamed {val_shards} shards to validation set.")
 
 def create_data_cache_dir(output_dir):
+    """
+    Create a directory to cache the tokenized data.
+    
+    Args:
+    - output_dir (str): Path to the output directory.
+    """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 def write_datafile(filename, tokens_np):
+    """
+    Save tokenized data to a .npy file.
+    
+    Args:
+    - filename (str): Path to the output file.
+    - tokens_np (numpy.ndarray): Array of tokenized data.
+    """
     np.save(filename, tokens_np)
 
 def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, shard_size=int(1e8)):
@@ -54,23 +74,22 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
     Args:
     - dataset_name (str): Name of the dataset to download.
     - remote_name (str): Remote configuration name of the dataset.
-    - split (str): Dataset split to use.
+    - split_ratio (float): Ratio of data to use for training; remainder is for validation.
     - output_dir (str): Directory to save the tokenized dataset.
     - shard_size (int): Number of tokens per shard.
     """
     create_data_cache_dir(output_dir)
-    
-    split="train"
+    split = "train"
 
-    logging.info(f"Loading dataset: {dataset_name} with config: {remote_name} and split: {split}")
+    logger.info(f"Loading dataset: {dataset_name} with config: {remote_name} and split: {split}")
     try:
         dataset = load_dataset(dataset_name, name=remote_name, split=split)
     except Exception as e:
-        logging.error(f"Failed to load dataset: {e}")
+        logger.error(f"Failed to load dataset: {e}")
         return
 
-    nprocs = max(1, os.cpu_count() // 2)
-    logging.info(f"Number of processors: {nprocs}")
+    nprocs = 1 + os.cpu_count() // 2
+    logger.info(f"Number of processors: {nprocs}")
 
     try:
         with mp.Pool(nprocs, initializer=init_gpt2_tokenizer) as pool:
@@ -102,11 +121,11 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
 
         val_shards(output_dir, split_ratio)
     except Exception as e:
-        logging.error(f"Error during tokenization: {e}")
+        logger.error(f"Error during tokenization: {e}")
         progress_bar.close()
         return
 
-    logging.info("Tokenization complete and data saved.")
+    logger.info("Tokenization complete and data saved.")
 
 if __name__ == "__main__":
     data_config = DataConfig()
@@ -118,3 +137,6 @@ if __name__ == "__main__":
         output_dir=data_config.output_dir,
         shard_size=data_config.shard_size
     )
+
+    # # change the number of shards for validation set if desire without downloading  
+    # val_shards(data_config.output_dir, .95)
