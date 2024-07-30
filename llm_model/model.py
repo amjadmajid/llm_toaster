@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 ENLARGE_FACTOR = 4
 
-class TransformerModel(nn.Module):
+class EncoderTransformerModel(nn.Module):
     """
     Simple Transformer-based Language Model.
 
@@ -23,13 +23,12 @@ class TransformerModel(nn.Module):
     """
 
     def __init__(self, n_head, vocab_size, n_embd, seq_len, device, dropout_rate=0.0, n_blocks=4):
-        super(TransformerModel, self).__init__()
+        super(EncoderTransformerModel, self).__init__()
         self.token_embeddings = nn.Embedding(vocab_size, n_embd)
         self.position_embeddings = nn.Embedding(seq_len, n_embd)
-        self.TransformerBlocks = nn.ModuleList([TransformerBlock(n_head, n_embd, seq_len, dropout_rate) for _ in range(n_blocks)])
+        self.TransformerBlocks = nn.ModuleList([TransformerBlock(n_head, n_embd, seq_len, dropout_rate, device) for _ in range(n_blocks)])
         self.norm =  nn.LayerNorm(n_embd)
         self.output_layer = nn.Linear(n_embd, vocab_size)
-
 
         # weights sharing scheme
         self.token_embeddings.weight = self.output_layer.weight
@@ -58,7 +57,7 @@ class TransformerModel(nn.Module):
         return logits
     
 
-    def generate(self, start_indices, max_length, topk=35):
+    def generate_text(self, start_indices, max_length, topk=35):
         """
         Generate text using the model.
 
@@ -105,11 +104,11 @@ class TransformerBlock(nn.Module):
         seq_len (int): Maximum sequence length.
         dropout_rate (float): Dropout rate.
     """
-    def __init__(self, n_head, n_embd, seq_len, dropout_rate=0.0):
+    def __init__(self, n_head, n_embd, seq_len, dropout_rate, device):
         super(TransformerBlock, self).__init__()
         self.norm1 = nn.LayerNorm(n_embd)
         self.norm2 = nn.LayerNorm(n_embd)
-        self.attention = CausalSelfAttention(n_head, n_embd, seq_len)
+        self.attention = CausalSelfAttention(n_head, n_embd, seq_len, dropout_rate, device=device)
         self.feed_forward = FeedForward(n_embd, n_embd * ENLARGE_FACTOR, dropout_rate)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -127,7 +126,7 @@ class CausalSelfAttention(nn.Module):
         n_embd (int): Embedding size.
         seq_len (int): Maximum sequence length.
     """
-    def __init__(self, n_head, n_embd, seq_len):
+    def __init__(self, n_head, n_embd, seq_len, dropout_rate, device):
         super().__init__()
         assert n_embd % n_head == 0
         self.c_attn = nn.Linear(n_embd, 3 * n_embd) # 3 * n_embd is for projecting the q k v in one transformation
@@ -150,6 +149,44 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
+
+# This is different implementation to CausalSelfAttention. 
+# It has a dropout layer    
+class MultiHeadCausalSelfAttention(nn.Module):
+    def __init__(self, n_head, n_embd, seq_len, dropout_rate, device):
+        super().__init__()
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head
+        assert self.head_dim * n_head == n_embd, "Embedding dimension must be divisible by number of heads"
+
+        # self.query = nn.Linear(n_embd, n_embd)
+        # self.key = nn.Linear(n_embd, n_embd)
+        # self.value = nn.Linear(n_embd, n_embd)
+        self.n_embd = n_embd
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
+        self.fc_out = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim])).to(device)
+        self.register_buffer('mask', torch.tril(torch.ones(seq_len, seq_len)))
+
+    def forward(self, x):
+        batch_size, seq_len, embed_size = x.shape
+
+        qkv = self.c_attn(x)
+        queries, keys, values = qkv.split(self.n_embd, dim=2)
+
+        queries = queries.view(batch_size, seq_len, self.n_head, self.head_dim)
+        keys = keys.view(batch_size, seq_len, self.n_head, self.head_dim)
+        values = values.view(batch_size, seq_len, self.n_head, self.head_dim)
+
+        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
+        energy = energy.masked_fill(self.mask[:seq_len, :seq_len] == 0, float('-inf'))
+        attention = torch.softmax(energy / self.scale, dim=-1)
+        attention = self.dropout(attention)
+
+        out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(batch_size, seq_len, embed_size)
+        out = self.fc_out(out)
+        return out
 
 class FeedForward(nn.Module):
     """
