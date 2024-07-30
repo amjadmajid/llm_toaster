@@ -6,7 +6,7 @@ import time
 from utils import evaluate_model, save_model, count_parameters, load_model_weights_
 from dataspace import DataLoaderLite
 from config import ConfigHandler
-from llm_model import TransformerModel
+from llm_model import EncoderTransformerModel
 from pathlib import Path
 import argparse
 
@@ -31,7 +31,7 @@ val_data      = DataLoaderLite(config.micro_batch_size, config.seq_len, 0, 1, 'v
 torch.set_float32_matmul_precision('high')
 
 # initialize the model
-model = TransformerModel(
+model = EncoderTransformerModel(
     n_head=config.n_head,
     vocab_size=config.vocab_size,
     n_embd=config.n_embd, 
