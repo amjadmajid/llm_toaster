@@ -1,14 +1,13 @@
-micro_batch_size: 6
-batch_size: 66
+micro_batch_size: 8
+batch_size: 64
 n_embd: 768
 n_head: 12
 n_layer: 12
 seq_len: 1024
 lr: 0.0002
-embd_pdrop: 0.2
-attn_pdrop: 0.1
-resid_pdrop: 0.1
-eval_inter: 20
+dropout_rate: 0.2
+log_inter: 20
+eval_inter: 200
 eval_iter: 10
 max_iter: 100_000
 n_blocks: 8
@@ -16,8 +15,7 @@ dtype: long
 tokenizer_type: "gpt2"
 vocab_size: 50304 #50257
 ckpt_dir: "llm_model/checkpoints"
-ckpt_model: "model"
-ckpt_config: "config"
-tokenized_data_path: "data/edu_fineweb10B"
-device: "cuda"  # or "mps" or "cpu" or "cuda"
+ckpt_model: "model_tmp"
+ckpt_config: "config_tmp"
+# device: "cuda"  # or "mps" or "cpu" or "cuda"
  
