@@ -22,7 +22,7 @@ def inference(config, model, prompt):
         print(f"Input truncated to the last {config.seq_len} tokens.")
     
     with torch.no_grad():
-        output = model.generate(input_ids, max_length=35)
+        output = model.generate_text(input_ids, max_length=35)
     generated_text = gpt2_decode(output[0].cpu().tolist())
     print(generated_text)
 
@@ -52,12 +52,15 @@ if __name__ == "__main__":
         n_embd=config.n_embd,
         seq_len=config.seq_len,
         device=config.device,
-        dropout_rate=config.embd_pdrop,
-        n_blocks=config.n_blocks
+        dropout_rate=config.dropout_rate,
+        n_blocks=config.n_blocks, 
+        decoder=True
     ).to(config.device)
 
     model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
     load_model_weights_(model, model_pth, config.device)
+
+    model = torch.compile(model)
 
     # Run inference with the initial prompt
     prompt = initial_prompt
