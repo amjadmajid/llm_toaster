@@ -1,1 +1,1 @@
-from .model import EncoderTransformerModel
+from .model import TransformerModel
