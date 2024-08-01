@@ -18,7 +18,7 @@ All configurations are specified in the `config/config.yaml` file. Ensure to rev
 ## Loading Dataset
 To download and tokenize the [fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset from Hugging Face, navigate to the `dataspace/loaders` directory and run:
 ```bash
-python hf_data_download_tokenize.py
+python download_tokenize_hf.py
 ```
 
 ## Training
