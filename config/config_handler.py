@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class DataConfig:
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     split_ratio: float = .98
-    output_dir: str =  "datasets/fineweb" 
+    output_dir: str =  "../../dataspace/fineweb" 
     remote_name: str = "sample-10BT"
     shard_size:int = int(1e8)
 
@@ -22,9 +22,8 @@ class ConfigHandler:
     n_layer: int
     seq_len: int
     lr: float
-    embd_pdrop: float
-    attn_pdrop: float
-    resid_pdrop: float
+    dropout_rate: float
+    log_inter: int
     eval_inter: int
     eval_iter: int
     max_iter: int
@@ -33,9 +32,9 @@ class ConfigHandler:
     ckpt_dir: str
     ckpt_model: str
     ckpt_config: str
-    tokenized_data_path: str
     tokenizer_type: str
     vocab_size: int
+    max_loss: float = float('inf')
     device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
     @staticmethod
