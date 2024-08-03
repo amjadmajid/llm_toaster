@@ -4,6 +4,6 @@ dataspace/extra
 dataspace/fineweb
 llm_toster.egg-info
 __pycache__
-llm_model/checkpoints/*
+model/checkpoints/*
 LLM_Toster.egg-info
 .vscode
