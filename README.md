@@ -1,4 +1,4 @@
-# LLM Toster
+# LLM Toaster
 
 <img style="max-width:400px" src="assets/images/llmtoster.jpg" alt="LLM Toster Logo">
 
