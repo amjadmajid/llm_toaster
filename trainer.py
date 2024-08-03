@@ -6,24 +6,17 @@ import time
 from utils import evaluate_model, save_model, count_parameters, load_model_weights_
 from dataspace import DataLoaderLite
 from config import ConfigHandler
-from llm_model import TransformerModel
+from model import TransformerModel
 from pathlib import Path
 import argparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-## Load configurations
-try:
-    config = ConfigHandler.load("config/config.yaml")
-    assert config.batch_size % config.micro_batch_size == 0, "batch_size has to be divisible by micro_batch_size"
-except Exception as e:
-    logger.error(f"Error loading configuration: {e}")
-    exit(1)
-
-logger.info(f"The selected device is {config.device}")
 
 def train(model, optimizer, criterion ,continue_training, config): 
+
+    CONFIG_SAVE = True # a flag to save the config file once 
 
     if continue_training:
         # load checkpointed configuration and model weights
@@ -31,17 +24,17 @@ def train(model, optimizer, criterion ,continue_training, config):
         load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device) # update model weights inplace 
         logger.info("Loaded model's weights")
 
-    train_losses = 0
+    losses = 0
     model = torch.compile(model)
     start_time = time.time()
+    training_time = 0
 
     for iteration in range(1, config.max_iter+1):
         
         optimizer.zero_grad()
-        grad_accumulations = config.batch_size // config.micro_batch_size
         accum_loss = 0
 
-        for _ in range(grad_accumulations):
+        for _ in range(config.n_batches):
 
             X, Y = training_data.next_batch()
             X = torch.tensor(X, dtype=torch.long).to(config.device)
@@ -50,7 +43,7 @@ def train(model, optimizer, criterion ,continue_training, config):
                 logits = model(X)
 
                 loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1))
-                loss = loss / grad_accumulations
+                loss = loss / config.n_batches
             accum_loss += loss.item()
             loss.backward()
 
@@ -58,33 +51,36 @@ def train(model, optimizer, criterion ,continue_training, config):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         optimizer.step()
-        train_losses += accum_loss
+        losses += accum_loss
 
         if iteration % config.log_inter == 0:
             # processing speed logging
             end_time = time.time() 
             dt =  (end_time - start_time ) / config.log_inter
+            training_time += dt
             start_time = end_time
             processed_tokens = config.batch_size * config.seq_len
             tokens_per_sec = processed_tokens // dt 
             # loss logging
-            train_loss = train_losses / config.log_inter
-            train_losses = 0
+            train_loss = losses / config.log_inter
+            losses = 0
 
-            logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} |  dt {dt * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
+            logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} |training time {training_time:.3f} s | dt {dt * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
 
         if iteration  % config.eval_inter == 0:
             # TODO: put with torch.no_grad() here. Outside the function
-            val_loss = evaluate_model(model,val_data, criterion, config)
+            val_loss = evaluate_model(model, val_data, criterion, config)
             logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
         
         # checkpointing
         if accum_loss < config.max_loss: 
-            config.max_loss = accum_loss
-            ckpt_model_path =  Path(config.ckpt_dir) / Path(config.ckpt_model)
-            ckpt_config_path =  Path(config.ckpt_dir) / Path(config.ckpt_config)
+            config.max_loss     = accum_loss
+            ckpt_model_path     = Path(config.ckpt_dir) / Path(config.ckpt_model)
+            ckpt_config_path    = Path(config.ckpt_dir) / Path(config.ckpt_config)
             save_model(model, ckpt_model_path )
-            config.save(ckpt_config_path)
+            if CONFIG_SAVE:
+                CONFIG_SAVE=False
+                config.save(ckpt_config_path)
             logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {accum_loss:.4f}")
 
 if __name__=="__main__":
@@ -92,9 +88,18 @@ if __name__=="__main__":
     parser.add_argument('-ct', '--continue-training', action='store_true', help='Flag to continue training from a saved model state')
     args = parser.parse_args()
 
+    ## Load configurations
+    try:
+        config = ConfigHandler.load("config/config.yaml")
+        assert config.batch_size % config.batch_size == 0, "batch_size has to be divisible by batch_size"
+    except Exception as e:
+        logger.error(f"Error loading configuration: {e}")
+
+    logger.info(f"The selected device is {config.device}")
+
     # initialize data loaders
-    training_data = DataLoaderLite(config.micro_batch_size, config.seq_len, 0, 1, 'train')
-    val_data      = DataLoaderLite(config.micro_batch_size, config.seq_len, 0, 1, 'val')
+    training_data = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'train')
+    val_data      = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'val')
 
     torch.set_float32_matmul_precision('high')
 
