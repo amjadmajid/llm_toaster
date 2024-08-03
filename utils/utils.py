@@ -31,7 +31,7 @@ def save_model(model, path):
     except Exception as e:
         logger.error(f"Error saving model: {e}")
 
-def load_model_weights_(model, path, device, compile_f=True):
+def load_model_weights_(model, path, device):
     """
     Load the model from a file.
 
@@ -57,10 +57,6 @@ def load_model_weights_(model, path, device, compile_f=True):
 
         # Load the modified state dictionary into the model
         model.load_state_dict(new_state_dict)
-
-        # Optionally, compile the model
-        if compile_f and "cuda" in device:
-            model = torch.compile(model)
 
     except Exception as e:
         logger.error(f"Error loading model: {e}")
