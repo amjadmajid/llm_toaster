@@ -15,7 +15,7 @@ class DataConfig:
 
 @dataclass
 class ConfigHandler:
-    micro_batch_size: int
+    n_batches: int
     batch_size: int
     n_embd: int
     n_head: int
