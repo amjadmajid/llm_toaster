@@ -3,10 +3,11 @@ import numpy as np
 import logging
 import argparse
 from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
-from llm_model import TransformerModel
+from model import TransformerModel
 from config import ConfigHandler
 from utils import load_model_weights_
 from pathlib import Path
+import sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,12 @@ def inference(config, model, prompt):
         output = model.generate_text(input_ids, max_length=35)
     generated_text = gpt2_decode(output[0].cpu().tolist())
     print(generated_text)
+
+def delete_last_line():
+    sys.stdout.write('\x1b[1A')  # Move cursor up one line
+    sys.stdout.write('\x1b[2K')  # Delete the entire line
+    sys.stdout.flush()
+
 
 if __name__ == "__main__":
     # Argument parser
@@ -66,6 +73,10 @@ if __name__ == "__main__":
     prompt = initial_prompt
     while True:
         inference(config, model, prompt)
-        prompt = input("\nEnter the next prompt (or 'exit' to quit): ")
+        print("\n-------------------------------------------")
+        print("Enter the next prompt (or 'exit' to quit):")
+        print("-------------------------------------------")
+        prompt = input("")
+        delete_last_line()
         if prompt.lower() == 'exit':
             break
