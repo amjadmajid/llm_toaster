@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import logging
 import time
+from datetime import timedelta
 
-from utils import evaluate_model, save_model, count_parameters, load_model_weights_
+from utils import evaluate_model, save_model, count_parameters, load_model_weights_, log_training_info
 from dataspace import DataLoaderLite
 from config import ConfigHandler
 from model import TransformerModel
@@ -13,26 +14,27 @@ import argparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def train_model(model, optimizer, criterion, continue_training, config): 
 
-def train(model, optimizer, criterion ,continue_training, config): 
-
-    CONFIG_SAVE = True # a flag to save the config file once 
+    CHECKPOINT_SAVE_DELAY = 20  # skip first 20 checkpoints if it is not in continue_training mode
 
     if continue_training:
+        CHECKPOINT_SAVE_DELAY = 0
         # load checkpointed configuration and model weights
         config = ConfigHandler.load(Path(config.ckpt_dir) / Path(config.ckpt_config))
-        load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device) # update model weights inplace 
+        # update model weights inplace 
+        load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device)  
         logger.info("Loaded model's weights")
 
-    losses = 0
+    total_loss = 0
     model = torch.compile(model)
-    start_time = time.time()
-    training_time = 0
+    interval_start_time = time.time()
+    training_start_time = time.time()
 
-    for iteration in range(1, config.max_iter+1):
+    for iteration in range(1, config.max_iter + 1):
         
         optimizer.zero_grad()
-        accum_loss = 0
+        batch_loss = 0
 
         for _ in range(config.n_batches):
 
@@ -43,52 +45,43 @@ def train(model, optimizer, criterion ,continue_training, config):
                 logits = model(X)
 
                 loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1))
-                loss = loss / config.n_batches
-            accum_loss += loss.item()
+                loss is loss / config.n_batches
+            batch_loss += loss.item()
             loss.backward()
 
         # gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         optimizer.step()
-        losses += accum_loss
+        total_loss += batch_loss
 
         if iteration % config.log_inter == 0:
-            # processing speed logging
-            end_time = time.time() 
-            dt =  (end_time - start_time ) / config.log_inter
-            training_time += dt
-            start_time = end_time
-            processed_tokens = config.batch_size * config.seq_len
-            tokens_per_sec = processed_tokens // dt 
-            # loss logging
-            train_loss = losses / config.log_inter
-            losses = 0
+            interval_start_time, total_loss = log_training_info(iteration, \
+                                config, total_loss, interval_start_time, training_start_time)
 
-            logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} |training time {training_time:.3f} s | dt {dt * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
-
-        if iteration  % config.eval_inter == 0:
-            # TODO: put with torch.no_grad() here. Outside the function
+        if iteration % config.eval_inter == 0:
             val_loss = evaluate_model(model, val_data, criterion, config)
             logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
         
         # checkpointing
-        if accum_loss < config.max_loss: 
-            config.max_loss     = accum_loss
-            ckpt_model_path     = Path(config.ckpt_dir) / Path(config.ckpt_model)
-            ckpt_config_path    = Path(config.ckpt_dir) / Path(config.ckpt_config)
-            save_model(model, ckpt_model_path )
-            if CONFIG_SAVE:
-                CONFIG_SAVE=False
-                config.save(ckpt_config_path)
-            logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {accum_loss:.4f}")
+        if batch_loss < config.max_loss: 
+            config.max_loss = batch_loss
+            ckpt_model_path = Path(config.ckpt_dir) / Path(config.ckpt_model)
+            ckpt_config_path = Path(config.ckpt_dir) / Path(config.ckpt_config)
 
-if __name__=="__main__":
+            logger.info(f"Iteration: {iteration}")
+            if iteration > CHECKPOINT_SAVE_DELAY:
+                save_model(model, ckpt_model_path)
+                config.save(ckpt_config_path)
+                logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BabyGPT script for LLM training")
-    parser.add_argument('-ct', '--continue-training', action='store_true', help='Flag to continue training from a saved model state')
+    parser.add_argument('-ct', '--continue-training', action='store_true', 
+                        help='Flag to continue training from a saved model state')
     args = parser.parse_args()
 
-    ## Load configurations
+    # Load configurations
     try:
         config = ConfigHandler.load("config/config.yaml")
         assert config.batch_size % config.batch_size == 0, "batch_size has to be divisible by batch_size"
@@ -99,7 +92,7 @@ if __name__=="__main__":
 
     # initialize data loaders
     training_data = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'train')
-    val_data      = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'val')
+    val_data = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'val')
 
     torch.set_float32_matmul_precision('high')
 
@@ -121,4 +114,4 @@ if __name__=="__main__":
 
     logger.info(f"The model has {count_parameters(model)} trainable parameters")
 
-    train(model, optimizer, criterion, args.continue_training, config)
+    train_model(model, optimizer, criterion, args.continue_training, config)

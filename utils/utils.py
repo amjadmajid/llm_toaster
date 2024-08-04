@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import logging
-import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -92,3 +92,25 @@ def evaluate_model(model, dataset, criterion, config):
             val_loss += loss.item()
     model.train()
     return val_loss / config.eval_iter
+
+
+def _format_time(seconds):
+    """Format time in seconds to hours, minutes, and seconds."""
+    logger.info(f"{seconds=}")
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+
+def log_training_info(iteration, config, total_loss, interval_start_time, training_start_time):
+    current_time = time.time()
+    training_time = _format_time(current_time - training_start_time)
+    iteration_time = (current_time - interval_start_time) / config.log_inter
+    interval_start_time = current_time
+    processed_tokens = config.batch_size * config.seq_len * config.n_batches
+    tokens_per_sec = processed_tokens // iteration_time
+    train_loss = total_loss / config.log_inter
+    total_loss = 0
+
+    logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} | Training Time: {training_time} | Iteration Time: {iteration_time * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
+
+    return interval_start_time, total_loss
