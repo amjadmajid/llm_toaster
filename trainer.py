@@ -16,15 +16,16 @@ logger = logging.getLogger(__name__)
 
 def train_model(model, optimizer, criterion, continue_training, config): 
 
-    CHECKPOINT_SAVE_DELAY = 20  # skip first 20 checkpoints if it is not in continue_training mode
-
     if continue_training:
-        CHECKPOINT_SAVE_DELAY = 0
         # load checkpointed configuration and model weights
         config = ConfigHandler.load(Path(config.ckpt_dir) / Path(config.ckpt_config))
         # update model weights inplace 
         load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device)  
         logger.info("Loaded model's weights")
+
+    # initialize data loaders
+    training_data = DataLoaderLite(config.batch_size, config.seq_len, config.current_shard,  0, 1, 'train')
+    val_data = DataLoaderLite(config.batch_size, config.seq_len,  0, 0, 1, 'val')
 
     total_loss = 0
     model = torch.compile(model)
@@ -38,14 +39,13 @@ def train_model(model, optimizer, criterion, continue_training, config):
 
         for _ in range(config.n_batches):
 
-            X, Y = training_data.next_batch()
+            X, Y, current_shard = training_data.next_batch()
             X = torch.tensor(X, dtype=torch.long).to(config.device)
             Y = torch.tensor(Y, dtype=torch.long).to(config.device)
             with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
                 logits = model(X)
 
-                loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1))
-                loss is loss / config.n_batches
+                loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) / config.n_batches
             batch_loss += loss.item()
             loss.backward()
 
@@ -69,11 +69,10 @@ def train_model(model, optimizer, criterion, continue_training, config):
             ckpt_model_path = Path(config.ckpt_dir) / Path(config.ckpt_model)
             ckpt_config_path = Path(config.ckpt_dir) / Path(config.ckpt_config)
 
-            logger.info(f"Iteration: {iteration}")
-            if iteration > CHECKPOINT_SAVE_DELAY:
-                save_model(model, ckpt_model_path)
-                config.save(ckpt_config_path)
-                logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
+            config.current_shard = current_shard
+            save_model(model, ckpt_model_path)
+            config.save(ckpt_config_path)
+            logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BabyGPT script for LLM training")
@@ -90,9 +89,6 @@ if __name__ == "__main__":
 
     logger.info(f"The selected device is {config.device}")
 
-    # initialize data loaders
-    training_data = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'train')
-    val_data = DataLoaderLite(config.batch_size, config.seq_len, 0, 1, 'val')
 
     torch.set_float32_matmul_precision('high')
 

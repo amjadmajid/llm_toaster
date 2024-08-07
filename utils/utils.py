@@ -83,7 +83,7 @@ def evaluate_model(model, dataset, criterion, config):
     val_loss = 0
     for _ in range(config.eval_iter):
         # X, Y = dataset.get_rand_batch(batch_size, seq_len)
-        X, Y = dataset.next_batch()
+        X, Y, _ = dataset.next_batch()
         X = torch.tensor(X, dtype=torch.long).to(config.device)
         Y = torch.tensor(Y, dtype=torch.long).to(config.device)
         with torch.no_grad():
@@ -96,7 +96,6 @@ def evaluate_model(model, dataset, criterion, config):
 
 def _format_time(seconds):
     """Format time in seconds to hours, minutes, and seconds."""
-    logger.info(f"{seconds=}")
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
