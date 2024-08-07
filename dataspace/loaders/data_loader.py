@@ -15,7 +15,7 @@ def load_tokens(filepath):
         raise
 
 class DataLoaderLite:
-    def __init__(self, B, T, process_rank=0, num_processes=1, split="train", data_root="dataspace/fineweb", master_process=True):
+    def __init__(self, B, T, current_shard=0, process_rank=0, num_processes=1, split="train", data_root="dataspace/fineweb", master_process=True):
         """
         Initialize the DataLoaderLite.
 
@@ -56,11 +56,12 @@ class DataLoaderLite:
         if master_process:
             logger.info(f"Found {len(shards)} shards for split {split}")
         
+        self.current_shard = current_shard
         self.reset()
 
     def reset(self):
         """Initialize or reset the state to start from the first shard."""
-        self.current_shard = 0
+        logger.info(f"{self.current_shard=}")
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
@@ -83,7 +84,7 @@ class DataLoaderLite:
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.advance_shard()
         
-        return x, y
+        return x, y, self.current_shard
 
     def advance_shard(self):
         """Advance to the next shard and reset the position."""
@@ -102,5 +103,5 @@ if __name__ == "__main__":
     data_loader = DataLoaderLite(B=32, T=128, split="train", data_root="dataspace/fineweb", master_process=True)
     data_loader.shuffle_shards()
     for _ in range(10):
-        x, y = data_loader.next_batch()
+        x, y, _ = data_loader.next_batch()
         print(x.shape, y.shape)

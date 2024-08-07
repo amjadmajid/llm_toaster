@@ -17,5 +17,6 @@ vocab_size: 50304 #50257
 ckpt_dir: "model/checkpoints"
 ckpt_model: "model_tmp"
 ckpt_config: "config_tmp"
+current_shard: 0
 # device: "cuda"  # or "mps" or "cpu" or "cuda"
  
