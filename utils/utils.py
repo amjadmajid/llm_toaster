@@ -93,7 +93,7 @@ def _format_time(seconds):
     """Format time in seconds to hours, minutes, and seconds."""
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+    return f"{int(hours):04d}h {int(minutes):02d}m {int(seconds):02d}s"
 
 def setup_logging(log_file):
     # Create a custom logger
