@@ -115,7 +115,7 @@ def setup_logging(log_file):
 
 def log_training_info(t_logger, iteration, config, total_loss, interval_start_time, training_start_time):
     current_time = time.time()
-    training_time = _format_time(current_time - training_start_time)
+    training_time = _format_time(current_time - training_start_time + config.training_session_duration)
     iteration_time = (current_time - interval_start_time) / config.log_inter
     interval_start_time = current_time
     processed_tokens = config.batch_size * config.seq_len * config.n_batches
@@ -123,7 +123,7 @@ def log_training_info(t_logger, iteration, config, total_loss, interval_start_ti
     train_loss = total_loss / config.log_inter
     total_loss = 0
 
-    # this will log to a file and the terminal
+    # this will log to a file and the terminal at the same time
     t_logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} | Training Time: {training_time} | Iteration Time: {iteration_time * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
 
     return interval_start_time, total_loss

@@ -35,6 +35,7 @@ class ConfigHandler:
     tokenizer_type: str
     vocab_size: int
     current_shard: int
+    training_session_duration: int
     max_loss: float = float('inf')
     device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
