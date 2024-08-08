@@ -43,7 +43,7 @@ def train_model(model, optimizer, criterion, continue_training, config):
 
     interval_start_time = time.time()
     training_start_time = time.time()
-    checkpoint_interval = 0
+    previous_checkpoint_time = 0
 
     for iteration in range(1, config.max_iter + 1):
         
@@ -81,8 +81,9 @@ def train_model(model, optimizer, criterion, continue_training, config):
             config.max_loss = batch_loss
             ckpt_model_path = Path(config.ckpt_dir) / Path(config.ckpt_model)
             ckpt_config_path = Path(config.ckpt_dir) / Path(config.ckpt_config)
-            config.training_session_duration += time.time() - training_start_time - checkpoint_interval
-            checkpoint_interval = time.time()
+            cehckpoint_time = time.time() - training_start_time 
+            config.training_session_duration += cehckpoint_time - previous_checkpoint_time
+            previous_checkpoint_time = cehckpoint_time
             config.current_shard = current_shard
             save_model(model, ckpt_model_path)
             config.save(ckpt_config_path)
