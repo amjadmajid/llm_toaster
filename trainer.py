@@ -2,9 +2,8 @@ import torch
 import torch.nn as nn
 import logging
 import time
-from datetime import timedelta
 
-from utils import evaluate_model, save_model, count_parameters, load_model_weights_, log_training_info
+from utils import evaluate_model, save_model, count_parameters, load_model_weights_, log_training_info, setup_logging
 from dataspace import DataLoaderLite
 from config import ConfigHandler
 from model import TransformerModel
@@ -14,6 +13,15 @@ import argparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# load configurations
+try:
+    config = ConfigHandler.load("config/config.yaml")
+    assert config.batch_size % config.batch_size == 0, "batch_size has to be divisible by batch_size"
+except Exception as e:
+    print(f"Error loading configuration: {e}")
+
+logger.info(f"The selected device is {config.device}")
+
 def train_model(model, optimizer, criterion, continue_training, config): 
 
     if continue_training:
@@ -22,6 +30,9 @@ def train_model(model, optimizer, criterion, continue_training, config):
         # update model weights inplace 
         load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device)  
         logger.info("Loaded model's weights")
+
+    # setup the logger
+    training_logger = setup_logging("log.txt")
 
     # initialize data loaders
     training_data = DataLoaderLite(config.batch_size, config.seq_len, config.current_shard,  0, 1, 'train')
@@ -56,7 +67,7 @@ def train_model(model, optimizer, criterion, continue_training, config):
         total_loss += batch_loss
 
         if iteration % config.log_inter == 0:
-            interval_start_time, total_loss = log_training_info(iteration, \
+            interval_start_time, total_loss = log_training_info(training_logger, iteration, \
                                 config, total_loss, interval_start_time, training_start_time)
 
         if iteration % config.eval_inter == 0:
@@ -79,16 +90,6 @@ if __name__ == "__main__":
     parser.add_argument('-ct', '--continue-training', action='store_true', 
                         help='Flag to continue training from a saved model state')
     args = parser.parse_args()
-
-    # Load configurations
-    try:
-        config = ConfigHandler.load("config/config.yaml")
-        assert config.batch_size % config.batch_size == 0, "batch_size has to be divisible by batch_size"
-    except Exception as e:
-        logger.error(f"Error loading configuration: {e}")
-
-    logger.info(f"The selected device is {config.device}")
-
 
     torch.set_float32_matmul_precision('high')
 

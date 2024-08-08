@@ -60,9 +60,6 @@ def load_model_weights_(model, path, device):
 
     except Exception as e:
         logger.error(f"Error loading model: {e}")
-        exit(1)
-
-        
 
 def evaluate_model(model, dataset, criterion, config):
     """
@@ -72,9 +69,7 @@ def evaluate_model(model, dataset, criterion, config):
         model (nn.Module): The model to evaluate.
         dataset (Dataset): The validation dataset.
         criterion (nn.Module): The loss function.
-        batch_size (int): Batch size for evaluation.
-        seq_len (int): Sequence length for evaluation.
-        eval_iter (int): Number of evaluation iterations.
+        config (ConfigHandler): The configurations
 
     Returns:
         float: Average validation loss.
@@ -100,7 +95,25 @@ def _format_time(seconds):
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
 
-def log_training_info(iteration, config, total_loss, interval_start_time, training_start_time):
+def setup_logging(log_file):
+    # Create a custom logger
+    t_logger = logging.getLogger("TRAIN_LOG")
+    t_logger.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(log_file)
+    
+    # Optional: Add rotating file handler for log rotation
+    # from logging.handlers import RotatingFileHandler
+    # file_handler = RotatingFileHandler(log_file, maxBytes=2000, backupCount=5)
+
+    formatter_file = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter_file)
+
+    t_logger.addHandler(file_handler)
+
+    return t_logger
+
+def log_training_info(t_logger, iteration, config, total_loss, interval_start_time, training_start_time):
     current_time = time.time()
     training_time = _format_time(current_time - training_start_time)
     iteration_time = (current_time - interval_start_time) / config.log_inter
@@ -110,6 +123,7 @@ def log_training_info(iteration, config, total_loss, interval_start_time, traini
     train_loss = total_loss / config.log_inter
     total_loss = 0
 
-    logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} | Training Time: {training_time} | Iteration Time: {iteration_time * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
+    # this will log to a file and the terminal
+    t_logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} | Training Time: {training_time} | Iteration Time: {iteration_time * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
 
     return interval_start_time, total_loss
