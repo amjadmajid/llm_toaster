@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 # load configurations
 try:
     config = ConfigHandler.load("config/config.yaml")
-    assert config.batch_size % config.batch_size == 0, "batch_size has to be divisible by batch_size"
 except Exception as e:
     print(f"Error loading configuration: {e}")
 
@@ -31,6 +30,9 @@ def train_model(model, optimizer, criterion, continue_training, config):
         load_model_weights_(model, Path(config.ckpt_dir) / Path(config.ckpt_model), config.device)  
         logger.info("Loaded model's weights")
 
+    ckpt_model_path = Path(config.ckpt_dir) / Path(config.ckpt_model)
+    ckpt_config_path = Path(config.ckpt_dir) / Path(config.ckpt_config)
+
     # setup the training progress logger
     training_logger = setup_logging("log.txt")
 
@@ -41,11 +43,15 @@ def train_model(model, optimizer, criterion, continue_training, config):
     total_loss = 0
     model = torch.compile(model)
 
-    interval_start_time = time.time()
-    training_start_time = time.time()
-    previous_checkpoint_time = 0
+    start_interval_timing = time.time()
+    start_ckpt_timing = time.time()
 
-    for iteration in range(1, config.max_iter + 1):
+    log_iteration = config.training_step + config.log_inter 
+
+    assert config.training_step < config.max_iter, "config.training_step must be smaller than config.max_iter"
+
+
+    for iteration in range(config.training_step, config.max_iter + 1):
         
         optimizer.zero_grad()
         batch_loss = 0
@@ -58,7 +64,8 @@ def train_model(model, optimizer, criterion, continue_training, config):
             with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
                 logits = model(X)
 
-                loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) / config.n_batches
+                loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) 
+                loss /=config.n_batches
             batch_loss += loss.item()
             loss.backward()
 
@@ -68,23 +75,27 @@ def train_model(model, optimizer, criterion, continue_training, config):
         optimizer.step()
         total_loss += batch_loss
 
-        if iteration % config.log_inter == 0:
-            interval_start_time, total_loss = log_training_info(training_logger, iteration, \
-                                config, total_loss, interval_start_time, training_start_time)
+        if iteration >= log_iteration:
+            log_iteration += config.log_inter
+            current_time = time.time()
+            iteration_duration = (current_time - start_interval_timing) / config.log_inter
+            training_duration = current_time - start_ckpt_timing + config.training_duration
+            log_training_info(training_logger, iteration, \
+                                config, total_loss, iteration_duration, training_duration)
+            total_loss = 0
+            start_interval_timing = current_time
 
-        if iteration % config.eval_inter == 0:
-            val_loss = evaluate_model(model, val_data, criterion, config)
-            logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
+        # if iteration % config.eval_inter == 0:
+        #     val_loss = evaluate_model(model, val_data, criterion, config)
+        #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
         
         # checkpointing
         if batch_loss < config.max_loss: 
             config.max_loss = batch_loss
-            ckpt_model_path = Path(config.ckpt_dir) / Path(config.ckpt_model)
-            ckpt_config_path = Path(config.ckpt_dir) / Path(config.ckpt_config)
-            cehckpoint_time = time.time() - training_start_time 
-            config.training_session_duration += cehckpoint_time - previous_checkpoint_time
-            previous_checkpoint_time = cehckpoint_time
+            config.training_duration = training_duration
+            start_ckpt_timing = time.time()
             config.current_shard = current_shard
+            config.training_step = iteration  # keep track of training progress across training sessions
             save_model(model, ckpt_model_path)
             config.save(ckpt_config_path)
             logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
