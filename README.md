@@ -26,6 +26,10 @@ To train the model, navigate to the `llm_toster` directory and run:
 ```bash
 python trainer.py
 ```
+or to continue training from the last checkpoint run: 
+```
+python trainer.py -ct
+```
 
 ## Inference
 To prompt the model, use the following command:
