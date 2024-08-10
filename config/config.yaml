@@ -18,6 +18,7 @@ ckpt_dir: "model/checkpoints"
 ckpt_model: "model_tmp"
 ckpt_config: "config_tmp"
 current_shard: 0
-training_session_duration: 0
+training_duration: 0
+training_step: 1 
 # device: "cuda"  # or "mps" or "cpu" or "cuda"
  
