@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 import time
 
-from utils import evaluate_model, save_model, count_parameters, load_model_weights_, log_training_info, setup_logging
+from utils import save_model, count_parameters, load_model_weights_, log_training_info, setup_logging
 from dataspace import DataLoaderLite
 from config import ConfigHandler
 from model import TransformerModel
@@ -78,10 +78,15 @@ def train_model(model, optimizer, criterion, continue_training, config):
         if iteration >= log_iteration:
             log_iteration += config.log_inter
             current_time = time.time()
+            
+            #Calculate iteration duration
             iteration_duration = (current_time - start_interval_timing) / config.log_inter
+            # Update the total training duration
             training_duration = current_time - start_ckpt_timing + config.training_duration
+            # Log training progress
             log_training_info(training_logger, iteration, \
                                 config, total_loss, iteration_duration, training_duration)
+            # Reset the loss and interval timing
             total_loss = 0
             start_interval_timing = current_time
 
@@ -89,13 +94,20 @@ def train_model(model, optimizer, criterion, continue_training, config):
         #     val_loss = evaluate_model(model, val_data, criterion, config)
         #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
         
-        # checkpointing
+        # Checkpointing
         if batch_loss < config.max_loss: 
             config.max_loss = batch_loss
-            config.training_duration = training_duration
-            start_ckpt_timing = time.time()
+            current_time = time.time()
+
+            # Update the training duration and reset checkpoint timing
+            config.training_duration = current_time - start_ckpt_timing + config.training_duration
+            start_ckpt_timing = current_time
+
+            # Update config checkpoint with current progress
             config.current_shard = current_shard
-            config.training_step = iteration  # keep track of training progress across training sessions
+            config.training_step = iteration  
+
+            # Save the model and configuration
             save_model(model, ckpt_model_path)
             config.save(ckpt_config_path)
             logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
