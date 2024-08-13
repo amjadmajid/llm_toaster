@@ -56,7 +56,7 @@ class TransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(n_embd)
         self.norm2 = nn.LayerNorm(n_embd)
         self.attention = SelfAttention(n_head, n_embd, seq_len, dropout_rate, causal=decoder, device=device)
-        self.feed_forward = FeedForwardLayer(n_embd, n_embd * 6, dropout_rate)
+        self.feed_forward = FeedForwardLayer(n_embd, n_embd * 4, dropout_rate)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

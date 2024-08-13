@@ -2,7 +2,7 @@ batch_size: 8
 n_batches: 16 # number of accumulated batches, before stepping the optimizer
 n_embd: 768
 n_head: 12
-n_layer: 12
+n_blocks: 12
 seq_len: 1024
 lr: 0.0006
 dropout_rate: 0.2
@@ -10,7 +10,6 @@ log_inter: 20
 eval_inter: 200
 eval_iter: 10
 max_iter: 100_000
-n_blocks: 8
 dtype: long
 tokenizer_type: "gpt2"
 vocab_size: 50304 #50257

@@ -19,7 +19,6 @@ class ConfigHandler:
     batch_size: int
     n_embd: int
     n_head: int
-    n_layer: int
     seq_len: int
     lr: float
     dropout_rate: float
