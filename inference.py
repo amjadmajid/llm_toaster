@@ -5,7 +5,7 @@ import argparse
 from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
 from model import TransformerModel
 from config import ConfigHandler
-from utils import load_model_weights_
+from utils import load_checkpoint_
 from pathlib import Path
 import sys
 
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     ).to(config.device)
 
     model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
-    load_model_weights_(model, model_pth, config.device)
+    load_checkpoint_(model, "_", "_",  model_pth, config.device, inference=True)
 
     model = torch.compile(model)
 

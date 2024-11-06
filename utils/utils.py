@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import logging
-import time
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -17,49 +17,49 @@ def count_parameters(model):
     """
     return f"{round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000_000, 2)}M"
 
-def save_model(model, path):
+def save_model(model, optimizer, scaler, path):
     """
-    Save the model to a file.
+    Save the model, optimizer, and scaler state to a file.
 
-    Args:
-        model (nn.Module): The model to save.
-        path (str): Path to the file.
+import datetime Path to the file.
     """
     try:
-        torch.save(model.state_dict(), path)
-        # logger.info(f"Model saved to {path}")
+        checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scaler_state_dict': scaler.state_dict()
+        }
+        torch.save(checkpoint, path)
     except Exception as e:
-        logger.error(f"Error saving model: {e}")
+        logger.error(f"Error saving model, optimizer, and scaler: {e}")
 
-def load_model_weights_(model, path, device):
+
+
+def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
     """
-    Load the model from a file.
+    Load the model, optimizer, and scaler state from a file.
 
     Args:
         model (nn.Module): The model to load into.
+        optimizer (Optimizer): The optimizer to load into.
+        scaler (GradScaler): The gradient scaler to load into.
         path (str): Path to the file.
         device (str): Device to load the model onto.
     """
-    # try:
-    #     model.load_state_dict(torch.load(path, map_location=device))
-    #     logger.info(f"Model loaded from {path}")
-    # except Exception as e:
-    #     logger.error(f"Error loading model: {e}")
-
-        # Load the model state dictionary
     try:
-        # Load the saved state dictionary
-        
-        state_dict = torch.load(path , map_location=device)
-
-        # Remove the "_orig_mod." prefix if it exists
+        checkpoint = torch.load(path, map_location=device)
+        # Load model state dict
+        state_dict = checkpoint['model_state_dict']
         new_state_dict = {key.replace("_orig_mod.", ""): value for key, value in state_dict.items()}
-
-        # Load the modified state dictionary into the model
         model.load_state_dict(new_state_dict)
-
+        # Load optimizer state dict
+        if not inference: 
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Load scaler state dict
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
     except Exception as e:
-        logger.error(f"Error loading model: {e}")
+        logger.error(f"Error loading model, optimizer, and scaler: {e}")
+
 
 def evaluate_model(model, dataset, criterion, config):
     """
@@ -95,30 +95,52 @@ def _format_time(seconds):
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours):04d}h {int(minutes):02d}m {int(seconds):02d}s"
 
-def setup_logging(log_file):
-    # Create a custom logger
-    t_logger = logging.getLogger("TRAIN_LOG")
-    t_logger.setLevel(logging.INFO)
+# def setup_logging(log_file):
+#     # Create a custom logger
+#     t_logger = logging.getLogger("TRAIN_LOG")
+#     t_logger.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler(log_file)
-    
-    # Optional: Add rotating file handler for log rotation
-    # from logging.handlers import RotatingFileHandler
-    # file_handler = RotatingFileHandler(log_file, maxBytes=2000, backupCount=5)
+#     # Remove all existing handlers from t_logger
+#     t_logger.handlers = []
+#     t_logger.propagate = False  # Prevent log messages from being passed to ancestor loggers
 
-    formatter_file = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter_file)
+#     # Create file handler and set level to INFO
+#     file_handler = logging.FileHandler(log_file)
+#     file_handler.setLevel(logging.INFO)
 
-    t_logger.addHandler(file_handler)
+#     # Create formatter and add it to the handler
+#     formatter = logging.Formatter('%(message)s')
+#     file_handler.setFormatter(formatter)
 
-    return t_logger
+#     # Add the handler to t_logger
+#     t_logger.addHandler(file_handler)
 
-def log_training_info(t_logger, iteration, config, total_loss, iteration_duration, training_duration):
+#     return t_logger
+
+
+def training_logs(iteration, config, loss, iteration_duration, training_duration):
+    # Get current time with milliseconds
+    now = datetime.datetime.now()
+    timestamp = now.strftime('%Y-%m-%d %H:%M:%S') + f",{int(now.microsecond / 1000):03d}"
+
     formatted_td = _format_time(training_duration)
-
     processed_tokens = config.batch_size * config.seq_len * config.n_batches
-    tokens_per_sec = processed_tokens // iteration_duration
-    train_loss = total_loss / config.log_inter
+    tokens_per_sec = processed_tokens / iteration_duration
 
-    # this will log to a file and the terminal at the same time
-    t_logger.info(f"Iteration {iteration} | Train Loss {train_loss:.5f} | Training Time: {formatted_td} | Iteration Time: {iteration_duration * 1000:.3f} ms | {tokens_per_sec} tokens/sec")
+    # Format numerical values to match the sample logs
+    iteration_time_ms = iteration_duration * 1000  # Convert to milliseconds
+
+    # Create the message
+    message = (f"Iteration {iteration} | Train Loss {loss:.5f} | Training Time: {formatted_td} | "
+               f"Iteration Time: {iteration_time_ms:.3f} ms | {tokens_per_sec:.1f} tokens/sec")
+
+    # Combine all parts into the final log string
+    log_str = f"{timestamp} - {message} \n"
+
+    return log_str
+
+def write_logs(file, logs, append_txt=True):
+
+    with open(file, 'a' if append_txt else 'w') as f:
+        f.write(logs)
+        f.flush()

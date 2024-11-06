@@ -3,7 +3,7 @@ import torch
 from dataclasses import dataclass, asdict
 import logging
 
-logger = logging.getLogger(__name__)
+config_logger = logging.getLogger(__name__)
 
 @dataclass
 class DataConfig:
@@ -11,7 +11,7 @@ class DataConfig:
     split_ratio: float = .98
     output_dir: str =  "../../dataspace/fineweb" 
     remote_name: str = "sample-10BT"
-    shard_size:int = int(1e8)
+    shard_size:int = int(1e7)
 
 @dataclass
 class ConfigHandler:
@@ -36,6 +36,7 @@ class ConfigHandler:
     current_shard: int
     training_step: int
     training_duration: float
+    log_file : str
     max_loss: float = float('inf')
     device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
@@ -51,15 +52,15 @@ class ConfigHandler:
             with open(filepath, 'w') as f: 
                 yaml.dump(self.to_dict(), f, indent=4)
         except Exception as e:
-            logger.error(f"Error saving config: {e}")
+            config_logger.error(f"Error saving config: {e}")
 
     @staticmethod
     def load(filepath: str) -> 'ConfigHandler': 
-        logger.info(filepath)
+        config_logger.info(filepath)
         try:
             with open(filepath, 'r') as f:
                 config_dict = yaml.safe_load(f)
             return ConfigHandler.from_dict(config_dict)
         except Exception as e:
-            logger.error(f"Error loading config: {e}")
+            config_logger.error(f"Error loading config: {e}")
             raise
