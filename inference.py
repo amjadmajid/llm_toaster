@@ -50,6 +50,9 @@ if __name__ == "__main__":
         logger.error(f"Error loading configuration: {e}")
         exit(1)
 
+    logger.info(f"the selected device is automatically selected according to this device")
+    config.device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+
     logger.info(f"The selected device is {config.device}")
 
     # Initialize the model
@@ -67,7 +70,11 @@ if __name__ == "__main__":
     model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
     load_checkpoint_(model, "_", "_",  model_pth, config.device, inference=True)
 
-    model = torch.compile(model)
+    if hasattr(torch, 'compile') and 'cuda' in config.device:
+        model = torch.compile(model)
+    else:
+        print("torch.compile is not available. Proceeding without compilation.")
+
 
     # Run inference with the initial prompt
     prompt = initial_prompt
