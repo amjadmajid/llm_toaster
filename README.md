@@ -13,23 +13,28 @@ pip install -e .
 This will install all necessary packages and dependencies.
 
 ## Configuration
-All configurations are specified in the `config/config.yaml` file. Ensure to review and modify this file according to your setup and requirements.
+All configurations can be found in the `llm_toaster/config` directory. Ensure to review and modify these configurations according to your setup and requirements.
 
-## Loading Dataset
-To download and tokenize the [fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset from Hugging Face, navigate to the `dataspace/loaders` directory and run:
+## Training
+### Step 1) data download and tokenization
+To download and tokenize the [fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset from Hugging Face, navigate to the `dataspace/src` directory and run:
 ```bash
 python download_tokenize_hf.py
 ```
+This command will take a file to download and tokenize about 27GB (after tokenization, the size will be reduced to about 10GB)
 
-## Training
+### Step 2) Training
 To train the model, navigate to the `llm_toaster` directory and run:
 ```bash
 python trainer.py
 ```
-or to continue training from the last checkpoint run: 
+### Step 3) Continue training 
+You can decide to stop the training and continue afterwards. 
+To continue training from the last checkpoint run: 
 ```
 python trainer.py -ct
 ```
+NOTE: progress is saved only during a checkpoint which is automatically taken when the loss is reduced. 
 
 ## Inference
 ### Option 1) Train your model
