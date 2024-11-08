@@ -6,5 +6,6 @@ llm_toster.egg-info
 __pycache__
 model/checkpoints/*
 !model/checkpoints/.gitkeep
+model/babyGPT/*.llm
 LLM_Toster.egg-info
 .vscode
