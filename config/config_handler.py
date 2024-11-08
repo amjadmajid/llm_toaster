@@ -14,6 +14,12 @@ class DataConfig:
     shard_size:int = int(1e7)
 
 @dataclass
+class InferenceConfig:
+    babyGPT_name: str = "BabyGPT_152M.llm"
+    babyGPT_config: str = "babyGPT_config.yaml"
+
+
+@dataclass
 class ConfigHandler:
     n_batches: int
     batch_size: int

@@ -1,2 +1,2 @@
-from .loaders.data_loader import DataLoaderLite
-from .loaders.download_tokenize_hf import download_and_tokenize
+from .src.data_loader import DataLoaderLite
+from .src.download_tokenize_hf import download_and_tokenize

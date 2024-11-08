@@ -1,1 +1,1 @@
-from .config_handler import ConfigHandler, DataConfig
+from .config_handler import ConfigHandler, DataConfig, InferenceConfig
