@@ -8,12 +8,14 @@ from model import TransformerModel
 from config import ConfigHandler
 from utils import load_checkpoint_
 from pathlib import Path
+from config import InferenceConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
 
+    inference_config = InferenceConfig()
     # Load configurations
     try:
         # TODO: this is not a good approach. Enable the user to load the desired checkpoint
@@ -43,4 +45,5 @@ if __name__ == "__main__":
     load_checkpoint_(model, "_", "_",  model_pth, config.device, inference=True)
 
     # Save only the model's state_dict
-    torch.save(model.state_dict(), 'model/babyGPT/babyGPT_152M')
+    babyGPT_path = Path('model/babyGPT/') / Path(inference_config.babyGPT_name)
+    torch.save(model.state_dict(), babyGPT_path)

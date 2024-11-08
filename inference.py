@@ -4,7 +4,7 @@ import logging
 import argparse
 from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
 from model import TransformerModel
-from config import ConfigHandler
+from config import ConfigHandler, InferenceConfig
 from pathlib import Path
 import sys
 
@@ -40,10 +40,13 @@ if __name__ == "__main__":
 
     initial_prompt = args.prompt
 
+    inference_config = InferenceConfig()
+    babyGPT_config_path = Path('model/babyGPT/') / Path(inference_config.babyGPT_config)
+    babyGPT_path = Path('model/babyGPT/') / Path(inference_config.babyGPT_name)
     # Load configurations
     try:
         # TODO: this is not a good approach. Enable the user to load the desired checkpoint
-        config = ConfigHandler.load("model/babyGPT/babyGPT_config")
+        config = ConfigHandler.load(babyGPT_config_path)
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
         exit(1)
@@ -65,7 +68,7 @@ if __name__ == "__main__":
         decoder=True
     ).to(config.device)
 
-    model.load_state_dict(torch.load("model/babyGPT/babyGPT_152M", map_location=config.device))
+    model.load_state_dict(torch.load(babyGPT_path, map_location=config.device))
 
     if hasattr(torch, 'compile') and 'cuda' in config.device:
         model = torch.compile(model)
