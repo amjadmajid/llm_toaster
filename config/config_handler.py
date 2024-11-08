@@ -15,7 +15,7 @@ class DataConfig:
 
 @dataclass
 class InferenceConfig:
-    babyGPT_name: str = "BabyGPT_152M.llm"
+    babyGPT_name: str = "babyGPT_152M.llm"
     babyGPT_config: str = "babyGPT_config.yaml"
 
 
