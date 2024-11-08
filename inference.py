@@ -5,7 +5,6 @@ import argparse
 from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
 from model import TransformerModel
 from config import ConfigHandler
-from utils import load_checkpoint_
 from pathlib import Path
 import sys
 
@@ -44,11 +43,13 @@ if __name__ == "__main__":
     # Load configurations
     try:
         # TODO: this is not a good approach. Enable the user to load the desired checkpoint
-        config = ConfigHandler.load("config/config.yaml")
-        config = ConfigHandler.load(Path(config.ckpt_dir)/ Path(config.ckpt_config))
+        config = ConfigHandler.load("model/babyGPT/babyGPT_config")
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
         exit(1)
+
+    logger.info(f"the selected device is automatically selected according to this device")
+    config.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
     logger.info(f"The selected device is {config.device}")
 
@@ -64,10 +65,13 @@ if __name__ == "__main__":
         decoder=True
     ).to(config.device)
 
-    model_pth = Path(config.ckpt_dir) / Path(config.ckpt_model)
-    load_checkpoint_(model, "_", "_",  model_pth, config.device, inference=True)
+    model.load_state_dict(torch.load("model/babyGPT/babyGPT_152M", map_location=config.device))
 
-    model = torch.compile(model)
+    if hasattr(torch, 'compile') and 'cuda' in config.device:
+        model = torch.compile(model)
+    else:
+        print("torch.compile is not available. Proceeding without compilation.")
+
 
     # Run inference with the initial prompt
     prompt = initial_prompt
