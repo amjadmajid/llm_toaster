@@ -22,7 +22,7 @@ python download_tokenize_hf.py
 ```
 
 ## Training
-To train the model, navigate to the `llm_toster` directory and run:
+To train the model, navigate to the `llm_toaster` directory and run:
 ```bash
 python trainer.py
 ```
@@ -32,6 +32,14 @@ python trainer.py -ct
 ```
 
 ## Inference
+### Option 1) Train your model
+If you just trained your model, then run the following script to extract the model from the checkpoint (a checkpoint consists of a model, an optimizer, and a scaler)
+```
+python extract_inference_model.py
+```
+This will extract the model from a checkpoint saved in `model/checkpoints` and save it under the `model/babyGPT`
+### Option 2) Download a pretrained model
+You can download a pretrained babyGPT model from [HERE](https://huggingface.co/AmjadMajid/BabyGPT/tree/main) and save it under `llm_toaster/model/babyGPT` directory. 
 To prompt the model, use the following command:
 ```bash
 python inference.py -p="Your prompt here"
