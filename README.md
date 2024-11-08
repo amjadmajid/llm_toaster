@@ -38,9 +38,6 @@ python inference.py -p="Your prompt here"
 ```
 You can continue interacting with the model by providing new prompts, or type `exit` to quit.
 
-## BabyGPT
-Download a pre-trained babyGPT (a 210M parameters model) from [Here](https://drive.google.com/drive/folders/140u7ScsKUuTnj103B9vTY6YbhU_GOykH?usp=sharing)
-
 ## Troubleshooting
 If you encounter any issues, please check the following:
 - Ensure all dependencies are installed.
