@@ -19,7 +19,7 @@ logger = logging.getLogger("TERMINAL_LOG")
 
 # load configurations
 try:
-    config = ConfigHandler.load("config/config.yaml")
+    config = ConfigHandler.load("config/default_config.yaml")
 except Exception as e:
     print(f"Error loading configuration: {e}")
 
