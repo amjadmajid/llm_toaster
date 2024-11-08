@@ -72,6 +72,11 @@ if __name__ == "__main__":
     else:
         print("torch.compile is not available. Proceeding without compilation.")
 
+    if hasattr(torch, 'compile') and 'cuda' in config.device:
+        model = torch.compile(model)
+    else:
+        print("torch.compile is not available. Proceeding without compilation.")
+
 
     # Run inference with the initial prompt
     prompt = initial_prompt
