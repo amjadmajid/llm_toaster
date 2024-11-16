@@ -11,8 +11,20 @@ from pathlib import Path
 import argparse
 import signal
 
-def do_nothing():
-    print("Ctrl-C disabled in this section of the code.")
+# Global flag for interrupt
+interrupted = False
+
+def signal_handler(sig, frame):
+    """
+    Signal handler for SIGINT (Ctrl-C).
+    Sets the interrupted flag to True.
+    """
+    global interrupted
+    print('\nReceived Ctrl-C. Will save checkpoint and exit after this iteration.')
+    interrupted = True
+
+# Register the signal handler
+signal.signal(signal.SIGINT, signal_handler)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TERMINAL_LOG")
@@ -62,81 +74,91 @@ def train_model(model, optimizer, criterion, continue_training, config):
     start_interval_timing = time.time()
     start_ckpt_timing = time.time()
 
-    for iteration in range(config.training_step, config.max_iter ):
-        
-        optimizer.zero_grad()
-        batch_loss = 0
-
-        for _ in range(config.n_batches):
-
-            X, Y, current_shard = training_data.next_batch()
-            X = torch.as_tensor(X, dtype=torch.long).to(config.device)
-            Y = torch.as_tensor(Y, dtype=torch.long).to(config.device)
-            with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
-                logits = model(X)
-
-                loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) 
-                loss /=config.n_batches
-            batch_loss += loss.item()
-
-            scaler.scale(loss).backward()
+    try: 
+        for iteration in range(config.training_step, config.max_iter ):
             
-        # gradient clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+            optimizer.zero_grad()
+            batch_loss = 0
 
-        # the reason for not using a modulo here is that when training resumed `iteration` can any number
-        if iteration >= log_iteration or batch_loss < config.max_loss:
-            log_iteration += config.log_inter
+            for _ in range(config.n_batches):
 
-            current_time = time.time()
+                X, Y, current_shard = training_data.next_batch()
+                X = torch.as_tensor(X, dtype=torch.long).to(config.device)
+                Y = torch.as_tensor(Y, dtype=torch.long).to(config.device)
+                with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
+                    logits = model(X)
+
+                    loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) 
+                    loss /=config.n_batches
+                batch_loss += loss.item()
+
+                scaler.scale(loss).backward()
+                
+            # gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            # the reason for not using a modulo here is that when training resumed `iteration` can any number
+            if iteration >= log_iteration or batch_loss < config.max_loss:
+                log_iteration += config.log_inter
+
+                current_time = time.time()
+                
+                #Calculate iteration duration
+                iteration_duration = (current_time - start_interval_timing) / max(1, (iteration - last_log_iteration))
+                # Update the total training duration
+                training_duration = current_time - start_ckpt_timing + config.training_duration
+                # Log training progress to terminal
+                _log_str = training_logs(iteration, \
+                                    config, batch_loss, iteration_duration, training_duration)
+                
+                logger.info(_log_str[:-1]) # remove the newline because the logger adds one
+                log_str += _log_str
+                
+                last_log_iteration = iteration
+                start_interval_timing = current_time
+
+            # if iteration % config.eval_inter == 0:
+            #     val_loss = evaluate_model(model, val_data, criterion, config)
+            #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
             
-            #Calculate iteration duration
-            iteration_duration = (current_time - start_interval_timing) / max(1, (iteration - last_log_iteration))
-            # Update the total training duration
-            training_duration = current_time - start_ckpt_timing + config.training_duration
-            # Log training progress to terminal
-            _log_str = training_logs(iteration, \
-                                config, batch_loss, iteration_duration, training_duration)
-            
-            logger.info(_log_str[:-1]) # remove the newline because the logger adds one
-            log_str += _log_str
-            
-            last_log_iteration = iteration
-            start_interval_timing = current_time
+                # Checkpointing
+                if batch_loss < config.max_loss or interrupted: 
+                    # Temporarily ignore SIGINT during checkpointing
+                    original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        # if iteration % config.eval_inter == 0:
-        #     val_loss = evaluate_model(model, val_data, criterion, config)
-        #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
-        
-            # Checkpointing
-            if batch_loss < config.max_loss: 
-                # disable Ctrl-C
-                signal.signal(signal.SIGINT, do_nothing) 
+                    try: 
+                        config.max_loss = batch_loss
 
-                config.max_loss = batch_loss
+                        # Update the training duration and reset checkpoint timing
+                        config.training_duration = current_time - start_ckpt_timing + config.training_duration
+                        start_ckpt_timing = current_time
 
-                # Update the training duration and reset checkpoint timing
-                config.training_duration = current_time - start_ckpt_timing + config.training_duration
-                start_ckpt_timing = current_time
+                        # Update config checkpoint with current progress
+                        config.current_shard = current_shard
+                        config.training_step = iteration  
 
-                # Update config checkpoint with current progress
-                config.current_shard = current_shard
-                config.training_step = iteration  
+                        # Save the model and configuration
+                        save_model(model, optimizer, scaler, ckpt_model_path)
+                        config.save(ckpt_config_path)
+                        #log to terminal
+                        logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
+                        #log traning progress to a file
 
-                # Save the model and configuration
-                save_model(model, optimizer, scaler, ckpt_model_path)
-                config.save(ckpt_config_path)
-                #log to terminal
-                logger.info(f"{iteration} - Model saved to {ckpt_model_path}; loss: {batch_loss:.4f}")
-                #log traning progress to a file
-
-                write_logs(config.log_file, log_str)
-                log_str =""
-                # re-enable Ctrl-C 
-                signal.signal(signal.SIGINT, signal.default_int_handler)
+                        write_logs(config.log_file, log_str)
+                        log_str =""
+                    finally:
+                        # Restore the original SIGINT handler
+                        signal.signal(signal.SIGINT, original_sigint_handler)
+                    if interrupted:
+                        logger.info("Checkpoint saved. Exiting training loop.")
+                        break
+    
+    except KeyboardInterrupt:
+        # Catch any KeyboardInterrupt exceptions that may not have been handled
+        logger.info("Training interrupted by user. Exiting without saving.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BabyGPT script for LLM training")
