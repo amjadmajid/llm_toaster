@@ -51,7 +51,7 @@ def train_model(model, optimizer, criterion, continue_training, config):
 
     if continue_training:
         # load checkpointed configuration and model weights
-        config = ConfigHandler.load(config.training.ckpt_config)
+        config = ConfigHandler.from_yaml(config.training.ckpt_config)
         # update model weights inplace 
         load_checkpoint_(model,optimizer, scaler,  config.training.ckpt, config.training.device)  
         logger.info("Model, optimizer, and scaler weights are loaded")
@@ -176,7 +176,7 @@ if __name__ == "__main__":
     else:
         print("PyTorch version does not support set_float32_matmul_precision.")
 
-    
+    #TODO
     config.training.vocab_size = 50304 # len(tokenizer)
 
     # initialize the model
