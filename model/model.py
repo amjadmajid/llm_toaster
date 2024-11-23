@@ -1,5 +1,50 @@
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
+
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+class FlashAttention(nn.Module):
+    """
+    Self-attention mechanism with optional causal masking.
+
+    Args:
+        n_head (int): Number of attention heads.
+        n_embd (int): Embedding size.
+        attn_pdrop (float): Dropout rate.
+        causal (bool): If True, apply causal masking.
+    """
+    def __init__(self, n_head: int, n_embd: int, seq_len: int, attn_pdrop: float, causal: bool, device: str):
+        super().__init__()
+        assert n_embd % n_head == 0, "Embedding size must be divisible by number of heads"
+        
+        self.n_head = n_head
+        self.head_dim = n_embd // n_head  # Compute head dimension once.
+        self.causal = causal
+
+        # Linear layers for QKV and output projection.
+        self.qkv_proj = nn.Linear(n_embd, 3 * n_embd)
+        self.output_proj = nn.Linear(n_embd, n_embd)
+
+        # Dropout for attention probabilities.
+        self.dropout = nn.Dropout(attn_pdrop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.size()
+        # Project input to queries, keys, and values.
+        qkv = self.qkv_proj(x).chunk(3, dim=-1)
+        q, k, v = [t.view(B, T, self.n_head, self.head_dim).transpose(1, 2) for t in qkv]
+        
+        # Compute attention using PyTorch's built-in function.
+        attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        
+        # Reshape back to the original tensor shape.
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
+        
+        # Apply output projection.
+        return self.output_proj(self.dropout(attn_output))
 
 class SelfAttention(nn.Module):
     """
@@ -55,7 +100,7 @@ class TransformerBlock(nn.Module):
         super(TransformerBlock, self).__init__()
         self.norm1 = nn.LayerNorm(n_embd)
         self.norm2 = nn.LayerNorm(n_embd)
-        self.attention = SelfAttention(n_head, n_embd, seq_len, dropout_rate, causal=decoder, device=device)
+        self.attention = FlashAttention(n_head, n_embd, seq_len, dropout_rate, causal=decoder, device=device)
         self.feed_forward = FeedForwardLayer(n_embd, n_embd * 4, dropout_rate)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -78,7 +123,15 @@ class TransformerModel(nn.Module):
         n_blocks (int): Number of transformer blocks.
         decoder (bool): If True, model is used as a decoder with causal masking.
     """
-    def __init__(self, n_head: int, vocab_size: int, n_embd: int, seq_len: int, device: str, dropout_rate: float = 0.0, n_blocks: int = 4, decoder: bool = False):
+    def __init__(self, 
+                 n_head: int, 
+                 vocab_size: int, 
+                 n_embd: int, 
+                 seq_len: int, 
+                 device: str, 
+                 dropout_rate: float = 0.0, 
+                 n_blocks: int = 4, 
+                 decoder: bool = False):
         super(TransformerModel, self).__init__()
         self.token_embeddings = nn.Embedding(vocab_size, n_embd)
         self.position_embeddings = nn.Embedding(seq_len, n_embd)
