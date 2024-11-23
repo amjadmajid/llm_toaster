@@ -1,11 +1,23 @@
-tests
-reference_structure.txt
-dataspace/extra
-dataspace/fineweb
-llm_toster.egg-info
-__pycache__
-model/checkpoints/*
-!model/checkpoints/.gitkeep
-model/babyGPT/*.llm
-LLM_Toster.egg-info
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
 .vscode
+
+# Logs
+logs/*.log
+logs/*.txt
+
+# Data and models
+checkpoints/
+!checkpoints/.gitkeep
+model/pretrained_models/
+!model/pretrained_models/.gitkeep
+
+dataspace/fineweb/
+dataspace/tokenized_data/
+
+# Packages
+*.egg-info/
+dist/
+build/

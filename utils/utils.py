@@ -17,22 +17,27 @@ def count_parameters(model):
     """
     return f"{round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000_000, 2)}M"
 
-def save_model(model, optimizer, scaler, path):
-    """
-    Save the model, optimizer, and scaler state to a file.
+# utils.py
 
-import datetime Path to the file.
+def save_model(model, optimizer, scaler, filepath, tokenizer_path,  tokenizer=None):
     """
-    try:
-        checkpoint = {
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scaler_state_dict': scaler.state_dict()
-        }
-        torch.save(checkpoint, path)
-    except Exception as e:
-        logger.error(f"Error saving model, optimizer, and scaler: {e}")
+    Saves the model checkpoint and tokenizer.
 
+    Args:
+        model: The model to save.
+        optimizer: The optimizer state.
+        scaler: The gradient scaler.
+        filepath: The path to save the model checkpoint.
+        tokenizer: The tokenizer to save.
+    """
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+    }
+    torch.save(checkpoint, filepath)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(tokenizer_path)
 
 
 def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
@@ -48,6 +53,7 @@ def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
     """
     try:
         checkpoint = torch.load(path, map_location=device)
+        logger.info(f"Model is loaded from {path}")
         # Load model state dict
         state_dict = checkpoint['model_state_dict']
         new_state_dict = {key.replace("_orig_mod.", ""): value for key, value in state_dict.items()}
@@ -76,17 +82,17 @@ def evaluate_model(model, dataset, criterion, config):
     """
     model.eval()
     val_loss = 0
-    for _ in range(config.eval_iter):
+    for _ in range(config.training.eval_iter):
         # X, Y = dataset.get_rand_batch(batch_size, seq_len)
         X, Y, _ = dataset.next_batch()
-        X = torch.tensor(X, dtype=torch.long).to(config.device)
-        Y = torch.tensor(Y, dtype=torch.long).to(config.device)
+        X = torch.tensor(X, dtype=torch.long).to(config.training.device)
+        Y = torch.tensor(Y, dtype=torch.long).to(config.training.device)
         with torch.no_grad():
             logits = model(X)
             loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1))
             val_loss += loss.item()
     model.train()
-    return val_loss / config.eval_iter
+    return val_loss / config.training.eval_iter
 
 
 def _format_time(seconds):
@@ -95,28 +101,6 @@ def _format_time(seconds):
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours):04d}h {int(minutes):02d}m {int(seconds):02d}s"
 
-# def setup_logging(log_file):
-#     # Create a custom logger
-#     t_logger = logging.getLogger("TRAIN_LOG")
-#     t_logger.setLevel(logging.INFO)
-
-#     # Remove all existing handlers from t_logger
-#     t_logger.handlers = []
-#     t_logger.propagate = False  # Prevent log messages from being passed to ancestor loggers
-
-#     # Create file handler and set level to INFO
-#     file_handler = logging.FileHandler(log_file)
-#     file_handler.setLevel(logging.INFO)
-
-#     # Create formatter and add it to the handler
-#     formatter = logging.Formatter('%(message)s')
-#     file_handler.setFormatter(formatter)
-
-#     # Add the handler to t_logger
-#     t_logger.addHandler(file_handler)
-
-#     return t_logger
-
 
 def training_logs(iteration, config, loss, iteration_duration, training_duration):
     # Get current time with milliseconds
@@ -124,7 +108,7 @@ def training_logs(iteration, config, loss, iteration_duration, training_duration
     timestamp = now.strftime('%Y-%m-%d %H:%M:%S') + f",{int(now.microsecond / 1000):03d}"
 
     formatted_td = _format_time(training_duration)
-    processed_tokens = config.batch_size * config.seq_len * config.n_batches
+    processed_tokens = config.training.batch_size * config.training.seq_len * config.training.n_batches
     tokens_per_sec = processed_tokens / iteration_duration
 
     # Format numerical values to match the sample logs
@@ -144,3 +128,4 @@ def write_logs(file, logs, append_txt=True):
     with open(file, 'a' if append_txt else 'w') as f:
         f.write(logs)
         f.flush()
+        
