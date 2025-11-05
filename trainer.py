@@ -6,7 +6,6 @@ import time
 from utils import save_model, count_parameters, load_checkpoint_, training_logs, write_logs
 from dataspace import DataLoaderLite
 from config import ConfigHandler
-from tokenizer_lib import init_tokenizer
 from model import TransformerModel
 from pathlib import Path
 import argparse

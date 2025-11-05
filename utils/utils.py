@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import logging
 import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,6 @@ def count_parameters(model):
 def save_model(model, optimizer, scaler, path):
     """
     Save the model, optimizer, and scaler state to a file.
-
-import datetime Path to the file.
     """
     try:
         checkpoint = {
@@ -32,8 +31,6 @@ import datetime Path to the file.
         torch.save(checkpoint, path)
     except Exception as e:
         logger.error(f"Error saving model, optimizer, and scaler: {e}")
-
-
 
 def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
     """
@@ -139,8 +136,15 @@ def training_logs(iteration, config, loss, iteration_duration, training_duration
 
     return log_str
 
-def write_logs(file, logs, append_txt=True):
+def write_logs(file, logs, append_txt=False):
+    import os
 
-    with open(file, 'a' if append_txt else 'w') as f:
+    # Ensure the directory exists before creating/writing the file
+    directory = os.path.dirname(file)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
+
+    # Always create a new file (overwrite any existing file)
+    with open(file, 'w') as f:
         f.write(logs)
         f.flush()
