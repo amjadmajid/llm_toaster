@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import logging
 import datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ def save_model(model, optimizer, scaler, path):
 import datetime Path to the file.
     """
     try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -141,6 +143,7 @@ def training_logs(iteration, config, loss, iteration_duration, training_duration
 
 def write_logs(file, logs, append_txt=True):
 
+    Path(file).parent.mkdir(parents=True, exist_ok=True)
     with open(file, 'a' if append_txt else 'w') as f:
         f.write(logs)
         f.flush()

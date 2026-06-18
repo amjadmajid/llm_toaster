@@ -52,7 +52,7 @@ def gpt2_encode_hf(doc, dtype=np.uint16):
 
     return tokens_np
 
-def gpt2_decode(tokens):
+def gpt2_decode(tokens, require_eot=True):
     """
     Decode a numpy array of uint16 tokens into a string.
     
@@ -63,10 +63,10 @@ def gpt2_decode(tokens):
     - str: The decoded string.
     """
     global enc, eot
-    if len(tokens) == 0 or tokens[0] != eot:
+    if require_eot and (len(tokens) == 0 or tokens[0] != eot):
         raise ValueError("Invalid token array: must start with the end-of-text token")
     
-    return enc.decode(tokens[1:])
+    return enc.decode(tokens[1:] if len(tokens) > 0 and tokens[0] == eot else tokens)
 
 # Example usage
 if __name__ == "__main__":

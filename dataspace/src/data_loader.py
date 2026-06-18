@@ -105,3 +105,66 @@ if __name__ == "__main__":
     for _ in range(10):
         x, y, _ = data_loader.next_batch()
         print(x.shape, y.shape)
+
+class InstructionDataLoader:
+    """Small JSONL supervised fine-tuning loader for instruction/response pairs.
+
+    Each JSONL row may contain either {"instruction": ..., "response": ...},
+    {"prompt": ..., "completion": ...}, or a single {"text": ...} field. Prompt
+    tokens are masked with -100 by default so loss is only applied to responses.
+    """
+
+    def __init__(self, B, T, dataset_path, encode_fn, prompt_template, response_template, train_on_prompt=False):
+        import json
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"Instruction dataset does not exist: {dataset_path}")
+        self.B = B
+        self.T = T
+        self.encode_fn = encode_fn
+        self.prompt_template = prompt_template
+        self.response_template = response_template
+        self.train_on_prompt = train_on_prompt
+        self.examples = []
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                self.examples.append(self._encode_row(row, line_no))
+        if not self.examples:
+            raise ValueError(f"No training examples found in {dataset_path}")
+        self.index = 0
+
+    def _encode_row(self, row, line_no):
+        if "text" in row:
+            ids = self.encode_fn(row["text"]).astype(np.int64).tolist()
+            return ids[: self.T + 1], None
+        instruction = row.get("instruction", row.get("prompt"))
+        response = row.get("response", row.get("completion"))
+        if instruction is None or response is None:
+            raise ValueError(f"Line {line_no} must contain text, instruction/response, or prompt/completion")
+        prompt = self.prompt_template.format(**row)
+        completion = self.response_template.format(**row)
+        prompt_ids = self.encode_fn(prompt).astype(np.int64).tolist()
+        response_ids = self.encode_fn(completion).astype(np.int64).tolist()
+        ids = (prompt_ids + response_ids)[: self.T + 1]
+        labels = ids[1:] + [-100]
+        if not self.train_on_prompt:
+            prompt_label_tokens = max(0, min(len(prompt_ids) - 1, len(labels)))
+            labels[:prompt_label_tokens] = [-100] * prompt_label_tokens
+        return ids, labels
+
+    def next_batch(self):
+        x = np.zeros((self.B, self.T), dtype=np.int64)
+        y = np.full((self.B, self.T), -100, dtype=np.int64)
+        for b in range(self.B):
+            ids, labels = self.examples[self.index]
+            self.index = (self.index + 1) % len(self.examples)
+            if len(ids) < 2:
+                continue
+            source = ids[:-1][: self.T]
+            target = labels[: self.T] if labels is not None else ids[1:][: self.T]
+            x[b, :len(source)] = source
+            y[b, :len(target)] = target
+        return x, y, 0
