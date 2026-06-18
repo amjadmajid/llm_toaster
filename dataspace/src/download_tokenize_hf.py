@@ -134,9 +134,9 @@ if __name__ == "__main__":
         dataset_name=data_config.dataset_name,
         remote_name=data_config.remote_name,
         split_ratio=data_config.split_ratio,
-        output_dir=data_config.output_dir,
+        output_dir=data_config.tokenized_data,
         shard_size=data_config.shard_size
     )
 
     # # change the number of shards for validation set if desire without downloading  
-    # val_shards(data_config.output_dir, .95)
+    # val_shards(data_config.tokenized_data, .95)

@@ -8,6 +8,7 @@ setup(
         'torch',
         'datasets',
         'tqdm',
+        'numpy',
         'pathlib',
         'tiktoken', 
         'PyYAML',

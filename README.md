@@ -62,3 +62,69 @@ Contributions are welcome! Please fork the repository and submit a pull request 
 
 ## License
 LLM Toster is released under the MIT License. See `LICENSE` for more details.
+
+## Base training and supervised fine-tuning
+
+LLM Toaster now has two explicit training modes:
+
+- **Base pretraining** (`training.mode: pretrain`) trains a causal language model from tokenized web/text shards and writes a base checkpoint such as `checkpoints/base_ckpt`.
+- **Instruction fine-tuning** (`training.mode: finetune` or `python trainer.py --mode finetune`) loads `finetune.base_ckpt`, trains on JSONL instruction data, and writes a separate instructed checkpoint such as `checkpoints/instruct_ckpt`.
+
+A supervised fine-tuning JSONL file can contain any of these schemas:
+
+```jsonl
+{"instruction": "Explain gradient accumulation.", "response": "Gradient accumulation ..."}
+{"prompt": "Write a haiku about GPUs", "completion": "Silent tensor cores ..."}
+{"text": "A fully formatted single training sample."}
+```
+
+By default, instruction fine-tuning masks prompt tokens with `-100`, so the loss is applied only to response tokens. Set `finetune.train_on_prompt: true` if you want the model to learn the prompt formatting too.
+
+Typical workflow:
+
+```bash
+# 1. Train the base model.
+python trainer.py --config config/default_config.yaml --mode pretrain
+
+# 2. Extract a compact inference artifact for the base model.
+python extract_inference_model.py \
+  --config checkpoints/base_config.yaml \
+  --output model/babyGPT/babyGPT_base.llm \
+  --output-config model/babyGPT/babyGPT_base.yaml
+
+# 3. Fine-tune from the base checkpoint into a separate instructed model.
+python trainer.py --config config/default_config.yaml --mode finetune
+
+# 4. Extract the instructed model.
+python extract_inference_model.py \
+  --config checkpoints/instruct_config.yaml \
+  --output model/babyGPT/babyGPT_instruct.llm \
+  --output-config model/babyGPT/babyGPT_instruct.yaml
+```
+
+## Development smoke checks
+
+A small config is available for fast local validation without using the full model size:
+
+```bash
+python -m unittest tests.test_config_and_data
+python trainer.py --config config/smoke_test_config.yaml --mode pretrain
+python trainer.py --config config/smoke_test_config.yaml --mode finetune
+```
+
+The unit test suite includes config loading checks and supervised fine-tuning loader checks. In minimal environments without optional numeric dependencies installed, data-loader tests are skipped rather than failing at import time.
+
+## Generation controls
+
+Inference exposes common sampling controls:
+
+```bash
+python inference.py \
+  --config model/babyGPT/babyGPT_instruct.yaml \
+  --model model/babyGPT/babyGPT_instruct.llm \
+  --prompt "Instruction:\nExplain attention.\n\nResponse:\n" \
+  --max-new-tokens 128 \
+  --temperature 0.8 \
+  --top-k 40 \
+  --top-p 0.95
+```

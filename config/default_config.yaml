@@ -1,4 +1,5 @@
 training:
+  mode: "pretrain" # "pretrain" builds a base model; "finetune" adapts a base checkpoint.
   batch_size: 7
   n_batches: 16  # Number of accumulated batches before stepping the optimizer
   n_embd: 1024
@@ -13,25 +14,37 @@ training:
   max_iter: 100_000
   dtype: "long"
   tokenizer_type: "gpt2"
-  ckpt: "checkpoints/ckpt"
-  ckpt_config: "checkpoints/ckpt_config.yaml"
+  ckpt: "checkpoints/base_ckpt"
+  ckpt_config: "checkpoints/base_config.yaml"
   current_shard: 0
   training_duration: 0.0
   training_step: 0
-  log_file: "logs/log.txt"
-  data_dir: "dataspace/tokenized_data" # TODO: check how to merge this and data.tokenized_data
+  log_file: "logs/pretrain_log.txt"
+  data_dir: "dataspace/fineweb"
   num_workers: 1
+
+finetune:
+  enabled: false
+  dataset_path: "dataspace/instruction_data.jsonl"
+  base_ckpt: "checkpoints/base_ckpt"
+  output_ckpt: "checkpoints/instruct_ckpt"
+  output_config: "checkpoints/instruct_config.yaml"
+  prompt_template: "Instruction:\n{instruction}\n\nResponse:\n"
+  response_template: "{response}"
+  train_on_prompt: false
+  seed: 1337
+  shuffle: true
 
 # Configurations used for model inference
 inference:
-  pretrained_model: "babyGPT_254M_QA.llm"
-  pretrained_model_config: "babyGPT_254_QA.yaml"
-  generate_max_length: 50  # Default maximum length for text generation
+  pretrained_model: "babyGPT_base.llm"
+  pretrained_model_config: "babyGPT_base.yaml"
+  generate_max_length: 50
 
-# Configurations used for data download and tokenization 
+# Configurations used for data download and tokenization
 data:
-  dataset_name: HuggingFaceFW/fineweb-edu" #'TIGER-Lab/WebInstructSub' #"HuggingFaceFW/fineweb-edu"
+  dataset_name: "HuggingFaceFW/fineweb-edu"
   split_ratio: 0.98
-  tokenized_data: dataspace/fineweb #'../tokenized_data' #"../../dataspace/fineweb"
+  tokenized_data: "dataspace/fineweb"
   remote_name: "sample-10BT"
-  shard_size: 10_000_000  # int(1e7)
+  shard_size: 10_000_000

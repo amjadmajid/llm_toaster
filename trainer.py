@@ -3,10 +3,10 @@ import torch.nn as nn
 import logging
 import time
 
-from utils import save_model, count_parameters, load_checkpoint_, training_logs, write_logs
-from dataspace import DataLoaderLite
+from utils import save_model, count_parameters, evaluate_model, load_checkpoint_, training_logs, write_logs
+from dataspace import DataLoaderLite, InstructionDataLoader
 from config import ConfigHandler
-from tokenizer_lib import init_tokenizer
+from tokenizer_lib import init_gpt2_tokenizer, gpt2_encode
 from model import TransformerModel
 from pathlib import Path
 import argparse
@@ -31,13 +31,6 @@ signal.signal(signal.SIGINT, signal_handler)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TERMINAL_LOG")
 
-# load configurations
-try:
-    config = ConfigHandler.from_yaml("config/default_config.yaml")
-except Exception as e:
-    print(f"Error loading configuration: {e}")
-
-logger.info(f"The selected device is {config.training.device}")
 
 def init_weights(module):
     if isinstance(module, nn.Linear):
@@ -45,9 +38,40 @@ def init_weights(module):
         if module.bias is not None:
             nn.init.zeros_(module.bias)
 
+def build_data_loader(config, split="train"):
+    if split == "train" and (config.training.mode == "finetune" or config.finetune.enabled):
+        init_gpt2_tokenizer()
+        return InstructionDataLoader(
+            config.training.batch_size,
+            config.training.seq_len,
+            config.finetune.dataset_path,
+            gpt2_encode,
+            config.finetune.prompt_template,
+            config.finetune.response_template,
+            config.finetune.train_on_prompt,
+            seed=config.finetune.seed,
+            shuffle=config.finetune.shuffle,
+        )
+    return DataLoaderLite(
+        config.training.batch_size,
+        config.training.seq_len,
+        config.training.current_shard,
+        0,
+        1,
+        split,
+        data_root=config.training.data_dir,
+    )
+
+
 def train_model(model, optimizer, criterion, continue_training, config): 
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler(enabled="cuda" in config.training.device)
+
+    if config.training.mode == "finetune" and not continue_training:
+        load_checkpoint_(model, optimizer, scaler, config.finetune.base_ckpt, config.training.device, inference=True)
+        config.training.ckpt = config.finetune.output_ckpt
+        config.training.ckpt_config = config.finetune.output_config
+        logger.info("Loaded base checkpoint for supervised fine-tuning: %s", config.finetune.base_ckpt)
 
     if continue_training:
         # load checkpointed configuration and model weights
@@ -73,8 +97,13 @@ def train_model(model, optimizer, criterion, continue_training, config):
         print("torch.compile is not available. Proceeding without compilation.")
 
     # initialize data loaders
-    training_data = DataLoaderLite(config.training.batch_size, config.training.seq_len, config.training.current_shard,  0, 1, 'train')
-    # val_data = DataLoaderLite(config.batch_size, config.seq_len,  0, 0, 1, 'val')
+    training_data = build_data_loader(config)
+    val_data = None
+    if config.training.mode == "pretrain" and config.training.eval_inter > 0:
+        try:
+            val_data = build_data_loader(config, split="val")
+        except (AssertionError, FileNotFoundError):
+            logger.info("Validation shards were not found; continuing without validation")
 
     start_interval_timing = time.time()
     start_ckpt_timing = time.time()
@@ -90,7 +119,8 @@ def train_model(model, optimizer, criterion, continue_training, config):
                 X, Y, current_shard = training_data.next_batch()
                 X = torch.as_tensor(X, dtype=torch.long).to(config.training.device)
                 Y = torch.as_tensor(Y, dtype=torch.long).to(config.training.device)
-                with torch.autocast(device_type=config.training.device, dtype=torch.bfloat16):
+                autocast_device = "cuda" if "cuda" in config.training.device else "cpu"
+                with torch.autocast(device_type=autocast_device, dtype=torch.bfloat16, enabled="cuda" in config.training.device):
                     logits = model(X)
 
                     loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) 
@@ -125,9 +155,9 @@ def train_model(model, optimizer, criterion, continue_training, config):
                 last_log_iteration = iteration
                 start_interval_timing = current_time
 
-            # if iteration % config.eval_inter == 0:
-            #     val_loss = evaluate_model(model, val_data, criterion, config)
-            #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
+            if val_data is not None and iteration > config.training.training_step and iteration % config.training.eval_inter == 0:
+                val_loss = evaluate_model(model, val_data, criterion, config.training)
+                logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
             
                 # Checkpointing
                 if batch_loss < config.training.max_loss or interrupted: 
@@ -169,15 +199,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BabyGPT script for LLM training")
     parser.add_argument('-ct', '--continue-training', action='store_true', 
                         help='Flag to continue training from a saved model state')
+    parser.add_argument('--config', default="config/default_config.yaml", help="Path to YAML config")
+    parser.add_argument('--mode', choices=["pretrain", "finetune"], help="Override training.mode")
     args = parser.parse_args()
+
+    config = ConfigHandler.from_yaml(args.config)
+    if args.mode:
+        config.training.mode = args.mode
+        config.finetune.enabled = args.mode == "finetune"
 
     if hasattr(torch, 'set_float32_matmul_precision'):
         torch.set_float32_matmul_precision('high')
     else:
         print("PyTorch version does not support set_float32_matmul_precision.")
 
-    #TODO
-    config.training.vocab_size = 50304 # len(tokenizer)
+    # GPT-2 vocabulary rounded to a multiple that is efficient on modern accelerators.
+    config.training.vocab_size = config.training.vocab_size or 50304
 
     # initialize the model
     model = TransformerModel(
@@ -204,4 +241,5 @@ if __name__ == "__main__":
 
     logger.info(f"The model has {count_parameters(model)} trainable parameters")
 
+    logger.info(f"The selected device is {config.training.device}")
     train_model(model, optimizer, criterion, args.continue_training, config)
