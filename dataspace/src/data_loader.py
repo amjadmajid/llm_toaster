@@ -7,9 +7,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def load_tokens(filepath):
-    """Load tokenized data from a .npy file."""
+    """Load tokenized data from a binary .npy shard or a text token shard.
+
+    Text shards are useful for tiny repository fixtures because GitHub renders
+    and diffs them normally. They may contain integer token IDs separated by
+    whitespace or commas.
+    """
     try:
-        return np.load(filepath).astype(np.int32)
+        if filepath.endswith(".npy"):
+            return np.load(filepath).astype(np.int32)
+        with open(filepath, "r", encoding="utf-8") as handle:
+            raw = handle.read().replace(",", " ").split()
+        return np.asarray([int(token) for token in raw], dtype=np.int32)
     except Exception as e:
         logger.error(f"Error loading tokens from {filepath}: {e}")
         raise
@@ -46,8 +55,9 @@ class DataLoaderLite:
         except FileNotFoundError:
             raise FileNotFoundError(f"The directory {data_root} does not exist")
         
-        # Filter for the appropriate split and .npy files
-        shards = [s for s in shards if split in s and s.endswith('.npy')]
+        # Filter for the appropriate split and supported token shard files
+        supported_exts = ('.npy', '.txt', '.tokens')
+        shards = [s for s in shards if split in s and s.endswith(supported_exts)]
         shards = sorted(shards)
         shards = [os.path.join(data_root, s) for s in shards]
         self.shards = shards
