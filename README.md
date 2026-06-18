@@ -128,3 +128,98 @@ python inference.py \
   --top-k 40 \
   --top-p 0.95
 ```
+
+## Modular Training Engine
+
+LLM Toaster now keeps the original `trainer.py` entrypoint as a compatibility wrapper while routing training through a modular engine under `llm_toaster/toaster/`.  The engine exposes explicit setup and lifecycle hooks (`setup_model`, `setup_tokenizer`, `setup_dataloaders`, `setup_optimizer`, `setup_scheduler`, `train_step`, `eval_step`, `save_checkpoint`, `load_checkpoint`, and `train`) so the project can stay educational while supporting extension points.
+
+### Install
+
+```bash
+pip install -e .
+pip install torch numpy pyyaml tiktoken
+```
+
+Optional integrations such as Hugging Face tokenizers, SentencePiece, FlashAttention 2, and xFormers are detected lazily and fail with clear errors if they are unavailable.
+
+### Quick smoke test
+
+```bash
+python -m unittest discover -s tests -v
+python trainer.py --config config/smoke_test_config.yaml --mode pretrain
+python trainer.py --config config/smoke_test_config.yaml --mode finetune
+python scripts/train.py --config config/smoke_test_config.yaml --mode pretrain
+```
+
+### Pretraining and SFT
+
+`training.mode: pretrain` uses tokenized `.npy` shards through the existing lightweight loader.  `training.mode: finetune` uses the JSONL SFT loader and can still be launched with:
+
+```bash
+python trainer.py --config config/default_config.yaml --mode pretrain
+python trainer.py --config config/default_config.yaml --mode finetune
+```
+
+The richer config schema adds `model`, `tokenizer`, `data`, `optimizer`, `scheduler`, `attention`, `peft`, `checkpointing`, `logging`, `distributed`, and `evaluation` sections while preserving legacy fields such as `training.batch_size`, `training.seq_len`, `training.lr`, `training.ckpt`, `finetune.dataset_path`, `finetune.base_ckpt`, and `finetune.output_ckpt`.
+
+### Supported SFT data formats
+
+The data adapter registry supports:
+
+- Pretraining/text rows: `{"text": "..."}`
+- Prompt/completion: `{"prompt": "...", "completion": "..."}`
+- Instruction/response: `{"instruction": "...", "response": "..."}`
+- Alpaca: `{"instruction": "...", "input": "...", "output": "..."}`
+- OpenAI messages: `{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}`
+- ShareGPT: `{"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]}`
+- Preference/DPO rows: `{"prompt": "...", "chosen": "...", "rejected": "..."}`
+
+Prompt tokens are masked with `-100` by default for SFT loss.  Set `finetune.train_on_prompt: true` to include prompt tokens in the loss.
+
+### Attention backends
+
+Configure attention with:
+
+```yaml
+attention:
+  backend: "sdpa"      # eager | sdpa | sdpa_auto | sdpa_flash | sdpa_mem_efficient | sdpa_math
+  sdpa_kernel: "auto"
+  use_gqa: false
+  sliding_window: null
+  dropout: 0.0
+```
+
+The model uses PyTorch scaled-dot-product attention for SDPA-style backends and an educational eager implementation for reference. Optional `flash_attn_2` and `xformers` paths are placeholders that report missing integrations cleanly.
+
+### LoRA finetuning
+
+Enable local LoRA without a hard Hugging Face PEFT dependency:
+
+```yaml
+peft:
+  enabled: true
+  method: "lora"
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+```
+
+When enabled, base parameters are frozen, LoRA adapter parameters remain trainable, and adapter-only state can be saved beside the normal checkpoint.
+
+### Checkpoint and resume
+
+Checkpoints are managed by `llm_toaster/toaster/training/checkpointing.py` and include model, optimizer, scheduler, scaler, config, global step, tokens seen, RNG state, best metric, data state where available, and the current git commit when available.
+
+```yaml
+checkpointing:
+  output_dir: "checkpoints"
+  save_every_steps: 500
+  save_best: true
+  save_total_limit: 3
+  resume_from_checkpoint: null
+```
+
+### Planned MoE roadmap
+
+MoE is intentionally not implemented yet. The feed-forward factory includes a placeholder `MoEFFN` so future MoE work can plug into `TransformerBlock` without changing the block interface.

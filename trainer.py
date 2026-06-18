@@ -1,245 +1,35 @@
-import torch
-import torch.nn as nn
-import logging
-import time
+"""Compatibility wrapper around the modular TrainingEngine."""
 
-from utils import save_model, count_parameters, evaluate_model, load_checkpoint_, training_logs, write_logs
-from dataspace import DataLoaderLite, InstructionDataLoader
-from config import ConfigHandler
-from tokenizer_lib import init_gpt2_tokenizer, gpt2_encode
-from model import TransformerModel
-from pathlib import Path
+from __future__ import annotations
+
 import argparse
-import signal
+import logging
 
+import torch
 
-# Global flag for interrupt
-interrupted = False
-
-def signal_handler(sig, frame):
-    """
-    Signal handler for SIGINT (Ctrl-C).
-    Sets the interrupted flag to True.
-    """
-    global interrupted
-    print('\nReceived Ctrl-C. Will save checkpoint and exit after this iteration.')
-    interrupted = True
-
-# Register the signal handler
-signal.signal(signal.SIGINT, signal_handler)
+from llm_toaster.toaster.config import ConfigHandler
+from llm_toaster.toaster.training.engine import TrainingEngine
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("TERMINAL_LOG")
 
 
-def init_weights(module):
-    if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight)
-        if module.bias is not None:
-            nn.init.zeros_(module.bias)
-
-def build_data_loader(config, split="train"):
-    if split == "train" and (config.training.mode == "finetune" or config.finetune.enabled):
-        init_gpt2_tokenizer()
-        return InstructionDataLoader(
-            config.training.batch_size,
-            config.training.seq_len,
-            config.finetune.dataset_path,
-            gpt2_encode,
-            config.finetune.prompt_template,
-            config.finetune.response_template,
-            config.finetune.train_on_prompt,
-            seed=config.finetune.seed,
-            shuffle=config.finetune.shuffle,
-        )
-    return DataLoaderLite(
-        config.training.batch_size,
-        config.training.seq_len,
-        config.training.current_shard,
-        0,
-        1,
-        split,
-        data_root=config.training.data_dir,
-    )
-
-
-def train_model(model, optimizer, criterion, continue_training, config): 
-
-    scaler = torch.cuda.amp.GradScaler(enabled="cuda" in config.training.device)
-
-    if config.training.mode == "finetune" and not continue_training:
-        load_checkpoint_(model, optimizer, scaler, config.finetune.base_ckpt, config.training.device, inference=True)
-        config.training.ckpt = config.finetune.output_ckpt
-        config.training.ckpt_config = config.finetune.output_config
-        logger.info("Loaded base checkpoint for supervised fine-tuning: %s", config.finetune.base_ckpt)
-
-    if continue_training:
-        # load checkpointed configuration and model weights
-        config = ConfigHandler.from_yaml(config.training.ckpt_config)
-        # update model weights inplace 
-        load_checkpoint_(model,optimizer, scaler,  config.training.ckpt, config.training.device)  
-        logger.info("Model, optimizer, and scaler weights are loaded")
-    else:
-        write_logs(config.training.log_file, "", append_txt=False)
-
-    assert config.training.training_step < config.training.max_iter, "config.training_step must be smaller than config.max_iter"
-
-    last_log_iteration = 0
-    total_loss = 0
-    log_str = ""
-
-    log_iteration = config.training.training_step + config.training.log_inter 
-    
-
-    if hasattr(torch, 'compile'):
-        model = torch.compile(model)
-    else:
-        print("torch.compile is not available. Proceeding without compilation.")
-
-    # initialize data loaders
-    training_data = build_data_loader(config)
-    val_data = None
-    if config.training.mode == "pretrain" and config.training.eval_inter > 0:
-        try:
-            val_data = build_data_loader(config, split="val")
-        except (AssertionError, FileNotFoundError):
-            logger.info("Validation shards were not found; continuing without validation")
-
-    start_interval_timing = time.time()
-    start_ckpt_timing = time.time()
-
-    try: 
-        for iteration in range(config.training.training_step, config.training.max_iter ):
-            
-            optimizer.zero_grad()
-            batch_loss = 0
-
-            for _ in range(config.training.n_batches):
-
-                X, Y, current_shard = training_data.next_batch()
-                X = torch.as_tensor(X, dtype=torch.long).to(config.training.device)
-                Y = torch.as_tensor(Y, dtype=torch.long).to(config.training.device)
-                autocast_device = "cuda" if "cuda" in config.training.device else "cpu"
-                with torch.autocast(device_type=autocast_device, dtype=torch.bfloat16, enabled="cuda" in config.training.device):
-                    logits = model(X)
-
-                    loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1)) 
-                    loss /=config.training.n_batches
-                batch_loss += loss.item()
-
-                scaler.scale(loss).backward()
-                
-            # gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-
-            # the reason for not using a modulo here is that when training resumed `iteration` can any number
-            if iteration >= log_iteration or batch_loss < config.training.max_loss:
-                log_iteration += config.training.log_inter
-
-                current_time = time.time()
-                
-                #Calculate iteration duration
-                iteration_duration = (current_time - start_interval_timing) / max(1, (iteration - last_log_iteration))
-                # Update the total training duration
-                training_duration = current_time - start_ckpt_timing + config.training.training_duration
-                # Log training progress to terminal
-                _log_str = training_logs(iteration, \
-                                    config.training, batch_loss, iteration_duration, training_duration)
-                
-                logger.info(_log_str[:-1]) # remove the newline because the logger adds one
-                log_str += _log_str
-                
-                last_log_iteration = iteration
-                start_interval_timing = current_time
-
-            if val_data is not None and iteration > config.training.training_step and iteration % config.training.eval_inter == 0:
-                val_loss = evaluate_model(model, val_data, criterion, config.training)
-                logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
-            
-                # Checkpointing
-                if batch_loss < config.training.max_loss or interrupted: 
-                    # Temporarily ignore SIGINT during checkpointing
-                    original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-                    try: 
-                        config.training.max_loss = batch_loss
-
-                        # Update the training duration and reset checkpoint timing
-                        config.training.training_duration = current_time - start_ckpt_timing + config.training.training_duration
-                        start_ckpt_timing = current_time
-
-                        # Update config checkpoint with current progress
-                        config.training.current_shard = current_shard
-                        config.training.training_step = iteration  
-
-                        # Save the model and configuration
-                        save_model(model, optimizer, scaler, config.training.ckpt)
-                        config.to_yaml(config.training.ckpt_config)
-                        #log to terminal
-                        logger.info(f"{iteration} - Model saved to {config.training.ckpt}; loss: {batch_loss:.4f}")
-                        #log traning progress to a file
-
-                        write_logs(config.training.log_file, log_str)
-                        log_str =""
-                    finally:
-                        # Restore the original SIGINT handler
-                        signal.signal(signal.SIGINT, original_sigint_handler)
-                    if interrupted:
-                        logger.info("Checkpoint saved. Exiting training loop.")
-                        break
-    
-    except KeyboardInterrupt:
-        # Catch any KeyboardInterrupt exceptions that may not have been handled
-        logger.info("Training interrupted by user. Exiting without saving.")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BabyGPT script for LLM training")
-    parser.add_argument('-ct', '--continue-training', action='store_true', 
-                        help='Flag to continue training from a saved model state')
-    parser.add_argument('--config', default="config/default_config.yaml", help="Path to YAML config")
-    parser.add_argument('--mode', choices=["pretrain", "finetune"], help="Override training.mode")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="LLM Toaster training wrapper")
+    parser.add_argument("-ct", "--continue-training", action="store_true", help="Resume from training.ckpt")
+    parser.add_argument("--config", default="config/default_config.yaml", help="Path to YAML config")
+    parser.add_argument("--mode", choices=["pretrain", "finetune", "sft"], help="Override training.mode")
     args = parser.parse_args()
 
     config = ConfigHandler.from_yaml(args.config)
     if args.mode:
-        config.training.mode = args.mode
-        config.finetune.enabled = args.mode == "finetune"
+        config.training.mode = "finetune" if args.mode == "sft" else args.mode
+        config.finetune.enabled = config.training.mode == "finetune"
+    if args.continue_training:
+        config.checkpointing.resume_from_checkpoint = config.training.ckpt
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+    TrainingEngine(config).train()
 
-    if hasattr(torch, 'set_float32_matmul_precision'):
-        torch.set_float32_matmul_precision('high')
-    else:
-        print("PyTorch version does not support set_float32_matmul_precision.")
 
-    # GPT-2 vocabulary rounded to a multiple that is efficient on modern accelerators.
-    config.training.vocab_size = config.training.vocab_size or 50304
-
-    # initialize the model
-    model = TransformerModel(
-        n_head=config.training.n_head,
-        vocab_size=config.training.vocab_size,
-        n_embd=config.training.n_embd, 
-        seq_len=config.training.seq_len, 
-        device=config.training.device,
-        dropout_rate=config.training.dropout_rate, 
-        n_blocks=config.training.n_blocks,
-        decoder=True 
-    ).to(config.training.device)
-
-    model.apply(init_weights)
-
-    # Clean CUDA cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        logger.info("Cleared CUDA cache to free up memory.")
-
-    # initialize optimizer and loss
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr)
-    criterion = nn.CrossEntropyLoss()
-
-    logger.info(f"The model has {count_parameters(model)} trainable parameters")
-
-    logger.info(f"The selected device is {config.training.device}")
-    train_model(model, optimizer, criterion, args.continue_training, config)
+if __name__ == "__main__":
+    main()
