@@ -101,3 +101,30 @@ python extract_inference_model.py \
   --output model/babyGPT/babyGPT_instruct.llm \
   --output-config model/babyGPT/babyGPT_instruct.yaml
 ```
+
+## Development smoke checks
+
+A small config is available for fast local validation without using the full model size:
+
+```bash
+python -m unittest tests.test_config_and_data
+python trainer.py --config config/smoke_test_config.yaml --mode pretrain
+python trainer.py --config config/smoke_test_config.yaml --mode finetune
+```
+
+The unit test suite includes config loading checks and supervised fine-tuning loader checks. In minimal environments without optional numeric dependencies installed, data-loader tests are skipped rather than failing at import time.
+
+## Generation controls
+
+Inference exposes common sampling controls:
+
+```bash
+python inference.py \
+  --config model/babyGPT/babyGPT_instruct.yaml \
+  --model model/babyGPT/babyGPT_instruct.llm \
+  --prompt "Instruction:\nExplain attention.\n\nResponse:\n" \
+  --max-new-tokens 128 \
+  --temperature 0.8 \
+  --top-k 40 \
+  --top-p 0.95
+```

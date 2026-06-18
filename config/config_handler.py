@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
@@ -73,6 +74,8 @@ class FineTuneConfig:
     prompt_template: str = "Instruction:\n{instruction}\n\nResponse:\n"
     response_template: str = "{response}"
     train_on_prompt: bool = False
+    seed: int = 1337
+    shuffle: bool = True
 
 
 @dataclass
@@ -144,6 +147,7 @@ class ConfigHandler:
     load = from_yaml
 
     def to_yaml(self, filepath: str):
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             if yaml is None:
                 import json

@@ -65,6 +65,7 @@ class DataLoaderLite:
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
 
+
     def next_batch(self):
         """Get the next batch of data."""
         B, T = self.B, self.T
@@ -114,8 +115,9 @@ class InstructionDataLoader:
     tokens are masked with -100 by default so loss is only applied to responses.
     """
 
-    def __init__(self, B, T, dataset_path, encode_fn, prompt_template, response_template, train_on_prompt=False):
+    def __init__(self, B, T, dataset_path, encode_fn, prompt_template, response_template, train_on_prompt=False, seed=1337, shuffle=True):
         import json
+        import random
         if not os.path.exists(dataset_path):
             raise FileNotFoundError(f"Instruction dataset does not exist: {dataset_path}")
         self.B = B
@@ -124,6 +126,8 @@ class InstructionDataLoader:
         self.prompt_template = prompt_template
         self.response_template = response_template
         self.train_on_prompt = train_on_prompt
+        self.rng = random.Random(seed)
+        self.shuffle = shuffle
         self.examples = []
         with open(dataset_path, "r", encoding="utf-8") as f:
             for line_no, line in enumerate(f, start=1):
@@ -135,10 +139,12 @@ class InstructionDataLoader:
         if not self.examples:
             raise ValueError(f"No training examples found in {dataset_path}")
         self.index = 0
+        if self.shuffle:
+            self.rng.shuffle(self.examples)
 
     def _encode_row(self, row, line_no):
         if "text" in row:
-            ids = self.encode_fn(row["text"]).astype(np.int64).tolist()
+            ids = self._encode(row["text"], add_eot=True)
             return ids[: self.T + 1], None
         instruction = row.get("instruction", row.get("prompt"))
         response = row.get("response", row.get("completion"))
@@ -146,8 +152,8 @@ class InstructionDataLoader:
             raise ValueError(f"Line {line_no} must contain text, instruction/response, or prompt/completion")
         prompt = self.prompt_template.format(**row)
         completion = self.response_template.format(**row)
-        prompt_ids = self.encode_fn(prompt).astype(np.int64).tolist()
-        response_ids = self.encode_fn(completion).astype(np.int64).tolist()
+        prompt_ids = self._encode(prompt, add_eot=True)
+        response_ids = self._encode(completion, add_eot=False)
         ids = (prompt_ids + response_ids)[: self.T + 1]
         labels = ids[1:] + [-100]
         if not self.train_on_prompt:
@@ -155,12 +161,22 @@ class InstructionDataLoader:
             labels[:prompt_label_tokens] = [-100] * prompt_label_tokens
         return ids, labels
 
+    def _encode(self, text, add_eot):
+        try:
+            return self.encode_fn(text, add_eot=add_eot).astype(np.int64).tolist()
+        except TypeError:
+            return self.encode_fn(text).astype(np.int64).tolist()
+
     def next_batch(self):
         x = np.zeros((self.B, self.T), dtype=np.int64)
         y = np.full((self.B, self.T), -100, dtype=np.int64)
         for b in range(self.B):
             ids, labels = self.examples[self.index]
-            self.index = (self.index + 1) % len(self.examples)
+            self.index += 1
+            if self.index >= len(self.examples):
+                self.index = 0
+                if self.shuffle:
+                    self.rng.shuffle(self.examples)
             if len(ids) < 2:
                 continue
             source = ids[:-1][: self.T]

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import logging
 import datetime
 from pathlib import Path
@@ -19,11 +18,7 @@ def count_parameters(model):
     return f"{round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000_000, 2)}M"
 
 def save_model(model, optimizer, scaler, path):
-    """
-    Save the model, optimizer, and scaler state to a file.
-
-import datetime Path to the file.
-    """
+    """Save the model, optimizer, and scaler state to a file."""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
@@ -34,6 +29,7 @@ import datetime Path to the file.
         torch.save(checkpoint, path)
     except Exception as e:
         logger.error(f"Error saving model, optimizer, and scaler: {e}")
+        raise
 
 
 
@@ -61,35 +57,25 @@ def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
     except Exception as e:
         logger.error(f"Error loading model, optimizer, and scaler: {e}")
+        raise
 
 
 def evaluate_model(model, dataset, criterion, config):
-    """
-    Evaluate the model on the validation dataset.
-
-    Args:
-        model (nn.Module): The model to evaluate.
-        dataset (Dataset): The validation dataset.
-        criterion (nn.Module): The loss function.
-        config (ConfigHandler): The configurations
-
-    Returns:
-        float: Average validation loss.
-    """
+    """Evaluate a language model on a validation loader."""
     model.eval()
-    val_loss = 0
-    for _ in range(config.eval_iter):
-        # X, Y = dataset.get_rand_batch(batch_size, seq_len)
-        X, Y, _ = dataset.next_batch()
-        X = torch.tensor(X, dtype=torch.long).to(config.device)
-        Y = torch.tensor(Y, dtype=torch.long).to(config.device)
-        with torch.no_grad():
+    val_loss = 0.0
+    eval_iter = getattr(config, "eval_iter", 10)
+    device = getattr(config, "device", "cpu")
+    with torch.no_grad():
+        for _ in range(eval_iter):
+            X, Y, _ = dataset.next_batch()
+            X = torch.as_tensor(X, dtype=torch.long).to(device)
+            Y = torch.as_tensor(Y, dtype=torch.long).to(device)
             logits = model(X)
             loss = criterion(logits.view(-1, logits.size(-1)), Y.view(-1))
             val_loss += loss.item()
     model.train()
-    return val_loss / config.eval_iter
-
+    return val_loss / eval_iter
 
 def _format_time(seconds):
     """Format time in seconds to hours, minutes, and seconds."""

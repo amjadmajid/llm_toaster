@@ -32,6 +32,8 @@ finetune:
   prompt_template: "Instruction:\n{instruction}\n\nResponse:\n"
   response_template: "{response}"
   train_on_prompt: false
+  seed: 1337
+  shuffle: true
 
 # Configurations used for model inference
 inference:

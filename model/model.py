@@ -1,67 +1,40 @@
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
 
 class FlashAttention(nn.Module):
-    """
-    Self-attention mechanism with optional causal masking.
+    """Self-attention mechanism backed by PyTorch scaled-dot-product attention."""
 
-    Args:
-        n_head (int): Number of attention heads.
-        n_embd (int): Embedding size.
-        attn_pdrop (float): Dropout rate.
-        causal (bool): If True, apply causal masking.
-    """
-    def __init__(self, n_head: int, n_embd: int, seq_len: int, attn_pdrop: float, causal: bool, device: str):
+    def __init__(self, n_head: int, n_embd: int, attn_pdrop: float, causal: bool):
         super().__init__()
         assert n_embd % n_head == 0, "Embedding size must be divisible by number of heads"
-        
         self.n_head = n_head
-        self.head_dim = n_embd // n_head  # Compute head dimension once.
+        self.head_dim = n_embd // n_head
         self.causal = causal
-
-        # Linear layers for QKV and output projection.
         self.qkv_proj = nn.Linear(n_embd, 3 * n_embd)
         self.output_proj = nn.Linear(n_embd, n_embd)
-
-        # Dropout for attention probabilities.
         self.dropout = nn.Dropout(attn_pdrop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
-        # Project input to queries, keys, and values.
-        qkv = self.qkv_proj(x).chunk(3, dim=-1)
-        q, k, v = [t.view(B, T, self.n_head, self.head_dim).transpose(1, 2) for t in qkv]
-        
-        # Compute attention using PyTorch's built-in function.
-        attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        
-        # Reshape back to the original tensor shape.
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, C)
-        
-        # Apply output projection.
-        return self.output_proj(self.dropout(attn_output))
+        q, k, v = self.qkv_proj(x).chunk(3, dim=-1)
+        q, k, v = [t.view(B, T, self.n_head, self.head_dim).transpose(1, 2) for t in (q, k, v)]
+        dropout_p = self.dropout.p if self.training else 0.0
+        y = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=self.causal)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.output_proj(y)
+
 
 class SelfAttention(nn.Module):
-    """
-    Self-attention mechanism with optional causal masking.
+    """Reference self-attention implementation with optional causal masking."""
 
-    Args:
-        n_head (int): Number of attention heads
-        n_embd (int): Embedding size.
-        seq_len (int): Maximum sequence length
-        attn_pdrop (float): Dropout rate
-        causal (bool): If True, apply causal masking
-        device (str): Device for training.
-    """
     def __init__(self, n_head: int, n_embd: int, seq_len: int, attn_pdrop: float, causal: bool, device: str):
         super().__init__()
         assert n_embd % n_head == 0, "Embedding size must be divisible by number of heads"
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd)  # Projecting q, k, v in one transformation
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
         self.c_proj = nn.Linear(n_embd, n_embd)
         self.n_head = n_head
         self.n_embd = n_embd
@@ -76,31 +49,22 @@ class SelfAttention(nn.Module):
         q, k, v = [t.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) for t in qkv]
         att = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1) ** 0.5))
         if self.causal:
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
         att = torch.softmax(att, dim=-1)
         att = self.dropout(att)
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        y = self.c_proj(y)
-        return y
+        return self.c_proj(y)
+
 
 class TransformerBlock(nn.Module):
-    """
-    Transformer block consisting of self-attention and feed-forward layers.
+    """Transformer block consisting of self-attention and feed-forward layers."""
 
-    Args:
-        n_head (int): Number of attention heads.
-        n_embd (int): Embedding size.
-        seq_len (int): Maximum sequence length.
-        dropout_rate (float): Dropout rate.
-        device (str): Device for training.
-        decoder (bool): If True, applies causal masking for the self-attention layer.
-    """
     def __init__(self, n_head: int, n_embd: int, seq_len: int, dropout_rate: float, device: str, decoder: bool):
-        super(TransformerBlock, self).__init__()
+        super().__init__()
         self.norm1 = nn.LayerNorm(n_embd)
         self.norm2 = nn.LayerNorm(n_embd)
-        self.attention = FlashAttention(n_head, n_embd, seq_len, dropout_rate, causal=decoder, device=device)
+        self.attention = FlashAttention(n_head, n_embd, dropout_rate, causal=decoder)
         self.feed_forward = FeedForwardLayer(n_embd, n_embd * 4, dropout_rate)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -109,30 +73,22 @@ class TransformerBlock(nn.Module):
         x = x + self.dropout(self.feed_forward(self.norm2(x)))
         return x
 
-class TransformerModel(nn.Module):
-    """
-    Transformer model with optional encoder/decoder functionality.
 
-    Args:
-        n_head (int): Number of attention heads.
-        vocab_size (int): Size of the vocabulary.
-        n_embd (int): Embedding size.
-        seq_len (int): Maximum sequence length.
-        device (str): Device for training.
-        dropout_rate (float): Dropout rate.
-        n_blocks (int): Number of transformer blocks.
-        decoder (bool): If True, model is used as a decoder with causal masking.
-    """
-    def __init__(self, 
-                 n_head: int, 
-                 vocab_size: int, 
-                 n_embd: int, 
-                 seq_len: int, 
-                 device: str, 
-                 dropout_rate: float = 0.0, 
-                 n_blocks: int = 4, 
-                 decoder: bool = False):
-        super(TransformerModel, self).__init__()
+class TransformerModel(nn.Module):
+    """Decoder-only Transformer language model."""
+
+    def __init__(
+        self,
+        n_head: int,
+        vocab_size: int,
+        n_embd: int,
+        seq_len: int,
+        device: str,
+        dropout_rate: float = 0.0,
+        n_blocks: int = 4,
+        decoder: bool = False,
+    ):
+        super().__init__()
         self.token_embeddings = nn.Embedding(vocab_size, n_embd)
         self.position_embeddings = nn.Embedding(seq_len, n_embd)
         self.TransformerBlocks = nn.ModuleList(
@@ -140,89 +96,80 @@ class TransformerModel(nn.Module):
         )
         self.norm = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
-
-        # Weight sharing scheme
         self.token_embeddings.weight = self.lm_head.weight
-
-        self.device = device
         self.seq_len = seq_len
         self.decoder = decoder
 
     def forward(self, input_indices: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the model.
-
-        Args:
-            input_indices (torch.Tensor): Input tensor of token indices.
-
-        Returns:
-            torch.Tensor: Logits for each token in the vocabulary.
-        """
+        B, T = input_indices.size()
+        if T > self.seq_len:
+            raise ValueError(f"Input sequence length {T} exceeds configured seq_len {self.seq_len}")
         token_emb = self.token_embeddings(input_indices)
-        position_emb = self.position_embeddings(torch.arange(input_indices.size(1), device=self.device))
+        positions = torch.arange(T, device=input_indices.device)
+        position_emb = self.position_embeddings(positions)
         x = token_emb + position_emb
         for block in self.TransformerBlocks:
             x = block(x)
-        x = self.norm(x)
-        logits = self.lm_head(x)
-        return logits
+        return self.lm_head(self.norm(x))
 
-    def generate_text(self, start_indices: torch.Tensor, max_length: int, topk: int = 35) -> torch.Tensor:
-        """
-        Generate text using the model.
-
-        Args:
-            start_indices (torch.Tensor): Starting indices for generation.
-            max_length (int): Maximum length of the generated sequence.
-            topk (int): Number of top probabilities to sample from.
-
-        Returns:
-            torch.Tensor: Generated token indices.
-        """
+    @torch.no_grad()
+    def generate_text(
+        self,
+        start_indices: torch.Tensor,
+        max_length: int,
+        topk: Optional[int] = 35,
+        temperature: float = 1.0,
+        top_p: Optional[float] = None,
+        eos_token_id: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Generate token IDs with temperature, top-k, and optional nucleus sampling."""
+        if temperature <= 0:
+            raise ValueError("temperature must be greater than 0")
+        was_training = self.training
         self.eval()
         generated_indices = start_indices
-        for _ in range(max_length):
-            # Ensure the input length does not exceed the sequence length
-            input_indices = generated_indices[:, -self.seq_len:]
-
-            # Get the logits from the model
-            logits = self(input_indices)
-            
-            # Apply softmax to get probabilities
-            probabilities = torch.softmax(logits[:, -1, :], dim=-1)
-            
-            # Perform top-k sampling
-            topk_p, topk_i = torch.topk(probabilities, topk, dim=-1)
-            
-            # Sample from the top-k probabilities
-            next_index = torch.multinomial(topk_p, num_samples=1)
-            
-            # Gather the actual token indices
-            next_index = torch.gather(topk_i, 1, next_index)
-            
-            # Append the sampled token to the generated sequence
-            generated_indices = torch.cat((generated_indices, next_index), dim=1)
-        
-        self.train()
+        try:
+            for _ in range(max_length):
+                input_indices = generated_indices[:, -self.seq_len:]
+                logits = self(input_indices)[:, -1, :] / temperature
+                logits = _filter_logits(logits, topk=topk, top_p=top_p)
+                probabilities = torch.softmax(logits, dim=-1)
+                next_index = torch.multinomial(probabilities, num_samples=1)
+                generated_indices = torch.cat((generated_indices, next_index), dim=1)
+                if eos_token_id is not None and torch.all(next_index == eos_token_id):
+                    break
+        finally:
+            self.train(was_training)
         return generated_indices
 
-class FeedForwardLayer(nn.Module):
-    """
-    Feed-forward neural network layer.
 
-    Args:
-        n_embd (int): Embedding size.
-        hidden_dim (int): Size of the hidden layer.
-        dropout_rate (float): Dropout rate.
-    """
+class FeedForwardLayer(nn.Module):
+    """Feed-forward neural network layer."""
+
     def __init__(self, n_embd: int, hidden_dim: int, dropout_rate: float = 0.0):
-        super(FeedForwardLayer, self).__init__()
+        super().__init__()
         self.net = nn.Sequential(
             nn.Linear(n_embd, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, n_embd),
-            nn.Dropout(dropout_rate)
+            nn.Dropout(dropout_rate),
         )
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+def _filter_logits(logits: torch.Tensor, topk: Optional[int] = None, top_p: Optional[float] = None) -> torch.Tensor:
+    if topk is not None and topk > 0:
+        topk = min(topk, logits.size(-1))
+        threshold = torch.topk(logits, topk, dim=-1).values[:, [-1]]
+        logits = logits.masked_fill(logits < threshold, float("-inf"))
+    if top_p is not None and 0 < top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+        cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+        sorted_indices_to_remove[:, 0] = False
+        indices_to_remove = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, sorted_indices, sorted_indices_to_remove)
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
+    return logits

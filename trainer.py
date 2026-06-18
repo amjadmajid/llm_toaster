@@ -3,7 +3,7 @@ import torch.nn as nn
 import logging
 import time
 
-from utils import save_model, count_parameters, load_checkpoint_, training_logs, write_logs
+from utils import save_model, count_parameters, evaluate_model, load_checkpoint_, training_logs, write_logs
 from dataspace import DataLoaderLite, InstructionDataLoader
 from config import ConfigHandler
 from tokenizer_lib import init_gpt2_tokenizer, gpt2_encode
@@ -38,8 +38,8 @@ def init_weights(module):
         if module.bias is not None:
             nn.init.zeros_(module.bias)
 
-def build_data_loader(config):
-    if config.training.mode == "finetune" or config.finetune.enabled:
+def build_data_loader(config, split="train"):
+    if split == "train" and (config.training.mode == "finetune" or config.finetune.enabled):
         init_gpt2_tokenizer()
         return InstructionDataLoader(
             config.training.batch_size,
@@ -49,6 +49,8 @@ def build_data_loader(config):
             config.finetune.prompt_template,
             config.finetune.response_template,
             config.finetune.train_on_prompt,
+            seed=config.finetune.seed,
+            shuffle=config.finetune.shuffle,
         )
     return DataLoaderLite(
         config.training.batch_size,
@@ -56,7 +58,7 @@ def build_data_loader(config):
         config.training.current_shard,
         0,
         1,
-        "train",
+        split,
         data_root=config.training.data_dir,
     )
 
@@ -96,7 +98,12 @@ def train_model(model, optimizer, criterion, continue_training, config):
 
     # initialize data loaders
     training_data = build_data_loader(config)
-    # val_data = DataLoaderLite(config.batch_size, config.seq_len,  0, 0, 1, 'val')
+    val_data = None
+    if config.training.mode == "pretrain" and config.training.eval_inter > 0:
+        try:
+            val_data = build_data_loader(config, split="val")
+        except (AssertionError, FileNotFoundError):
+            logger.info("Validation shards were not found; continuing without validation")
 
     start_interval_timing = time.time()
     start_ckpt_timing = time.time()
@@ -148,9 +155,9 @@ def train_model(model, optimizer, criterion, continue_training, config):
                 last_log_iteration = iteration
                 start_interval_timing = current_time
 
-            # if iteration % config.eval_inter == 0:
-            #     val_loss = evaluate_model(model, val_data, criterion, config)
-            #     logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
+            if val_data is not None and iteration > config.training.training_step and iteration % config.training.eval_inter == 0:
+                val_loss = evaluate_model(model, val_data, criterion, config.training)
+                logger.info(f"Iteration {iteration} | Validation Loss {val_loss:.5f} ")
             
                 # Checkpointing
                 if batch_loss < config.training.max_loss or interrupted: 

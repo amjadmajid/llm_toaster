@@ -1,0 +1,42 @@
+training:
+  mode: "pretrain"
+  batch_size: 2
+  n_batches: 1
+  n_embd: 64
+  n_head: 4
+  n_blocks: 2
+  seq_len: 32
+  lr: 0.0006
+  dropout_rate: 0.0
+  log_inter: 1
+  eval_inter: 1
+  eval_iter: 1
+  max_iter: 2
+  ckpt: "checkpoints/smoke_base_ckpt"
+  ckpt_config: "checkpoints/smoke_base_config.yaml"
+  log_file: "logs/smoke_pretrain_log.txt"
+  data_dir: "tests/fixtures/tokenized_data"
+
+finetune:
+  enabled: false
+  dataset_path: "tests/fixtures/instruction_data.jsonl"
+  base_ckpt: "checkpoints/smoke_base_ckpt"
+  output_ckpt: "checkpoints/smoke_instruct_ckpt"
+  output_config: "checkpoints/smoke_instruct_config.yaml"
+  prompt_template: "Instruction:\n{instruction}\n\nResponse:\n"
+  response_template: "{response}"
+  train_on_prompt: false
+  seed: 1337
+  shuffle: false
+
+inference:
+  pretrained_model: "babyGPT_smoke_base.llm"
+  pretrained_model_config: "babyGPT_smoke_base.yaml"
+  generate_max_length: 8
+
+data:
+  dataset_name: "fixture"
+  split_ratio: 0.5
+  tokenized_data: "tests/fixtures/tokenized_data"
+  remote_name: "fixture"
+  shard_size: 128
