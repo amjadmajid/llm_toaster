@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,12 @@ from ..tokenizers import build_tokenizer
 from .checkpointing import load_checkpoint as load_training_checkpoint
 from .checkpointing import rotate_checkpoints
 from .checkpointing import save_checkpoint as save_training_checkpoint
+from .metrics import (
+    JsonlMetricsWriter,
+    architecture_summary,
+    format_architecture_summary,
+    format_metrics_line,
+)
 from .optim import build_optimizer, build_scheduler
 
 logger = logging.getLogger(__name__)
@@ -43,6 +50,7 @@ class TrainingEngine:
         self.scaler = None
         self.train_loader = None
         self.val_loader = None
+        self.last_grad_norm = 0.0
         self._configure_file_logging()
 
     def setup_tokenizer(self):
@@ -112,7 +120,7 @@ class TrainingEngine:
         trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if trainable_parameters:
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
+            self.last_grad_norm = float(torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0))
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.scheduler.step()
@@ -173,7 +181,6 @@ class TrainingEngine:
         seed_everything(self.config.training.seed)
         self.setup_tokenizer()
         self.setup_model()
-        logger.info("model: %s", model_size_summary(self.model))
         self._load_base_checkpoint_for_finetune()
         self.setup_dataloaders()
         self.setup_optimizer()
@@ -181,13 +188,46 @@ class TrainingEngine:
         self.setup_scaler()
         self._resume_if_requested()
 
-        while self.global_step < self.config.training.max_iter:
-            loss = self.train_step()
-            if self.global_step % max(1, self.config.logging.log_every_steps) == 0:
-                logger.info("step %s loss %.4f", self.global_step, loss)
-            metric = self._maybe_evaluate()
-            self._maybe_save(metric)
+        metrics = JsonlMetricsWriter(self.config.logging.metrics_file)
+        summary = architecture_summary(self.model, self.config)
+        for line in format_architecture_summary(summary):
+            logger.info(line)
+        metrics.write({"type": "architecture", **summary})
+
+        start = time.perf_counter()
+        last_log_time, last_log_tokens = start, self.tokens_seen
+        log_every = max(1, self.config.logging.log_every_steps)
+        try:
+            while self.global_step < self.config.training.max_iter:
+                loss = self.train_step()
+                if self.global_step % log_every == 0:
+                    now = time.perf_counter()
+                    interval = now - last_log_time
+                    record = {
+                        "step": self.global_step,
+                        "max_iter": self.config.training.max_iter,
+                        "loss": loss,
+                        "lr": self.scheduler.get_last_lr()[0],
+                        "grad_norm": self.last_grad_norm,
+                        "tokens_per_sec": (self.tokens_seen - last_log_tokens) / interval if interval > 0 else 0.0,
+                        "tokens_seen": self.tokens_seen,
+                        "elapsed_s": now - start,
+                        "eta_s": self._eta_seconds(now - start),
+                    }
+                    logger.info(format_metrics_line(record))
+                    metrics.write({"type": "step", **record})
+                    last_log_time, last_log_tokens = now, self.tokens_seen
+                metric = self._maybe_evaluate()
+                self._maybe_save(metric)
+        finally:
+            metrics.close()
         return self
+
+    def _eta_seconds(self, elapsed: float) -> float:
+        if self.global_step <= 0:
+            return 0.0
+        remaining = max(0, self.config.training.max_iter - self.global_step)
+        return remaining * (elapsed / self.global_step)
 
     @property
     def is_finetune_mode(self) -> bool:

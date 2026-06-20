@@ -17,6 +17,7 @@ from llm_toaster.toaster.training.checkpointing import (
     save_checkpoint,
 )
 from llm_toaster.toaster.training.engine import model_size_summary, perplexity, seed_everything
+from llm_toaster.toaster.training.metrics import architecture_summary
 
 
 def _tiny_config():
@@ -51,6 +52,23 @@ class ModelSizeTests(unittest.TestCase):
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.assertLess(trainable, total)
         self.assertIn(f"{trainable:,} trainable", model_size_summary(model))
+
+
+class ArchitectureSummaryTests(unittest.TestCase):
+    def test_params_split_and_kv_cache(self):
+        config = _tiny_config()
+        summary = architecture_summary(build_model(config), config)
+        self.assertEqual(summary["params_total"], summary["params_embedding"] + summary["params_non_embedding"])
+        self.assertGreater(summary["kv_bytes_per_token"], 0)
+        self.assertEqual(summary["attention_kind"], "MHA")
+
+    def test_gqa_shrinks_kv_cache(self):
+        full = _tiny_config()
+        gqa = _tiny_config()
+        gqa.model.num_key_value_heads = 1  # MQA: fewest KV heads
+        full_kv = architecture_summary(build_model(full), full)["kv_bytes_per_token"]
+        gqa_kv = architecture_summary(build_model(gqa), gqa)["kv_bytes_per_token"]
+        self.assertLess(gqa_kv, full_kv)
 
 
 class PerplexityTests(unittest.TestCase):

@@ -22,6 +22,7 @@ def _smoke_cfg(td, mode="pretrain"):
     config.training.device = "cpu"
     config.distributed.mixed_precision = "no"
     config.logging.log_file = os.path.join(td, "log.txt")
+    config.logging.metrics_file = os.path.join(td, "metrics.jsonl")
     config.checkpointing.output_dir = td
     config.training.ckpt = os.path.join(td, "base_ckpt")
     config.training.ckpt_config = os.path.join(td, "base_config.yaml")
@@ -37,6 +38,19 @@ class TrainingSmokeTests(unittest.TestCase):
             engine = TrainingEngine(config).train()
             self.assertEqual(engine.global_step, config.training.max_iter)
             self.assertTrue(os.path.exists(config.training.ckpt))
+
+    def test_metrics_file_has_architecture_and_step_rows(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as td:
+            config = _smoke_cfg(td, "pretrain")
+            TrainingEngine(config).train()
+            rows = [json.loads(line) for line in open(config.logging.metrics_file, encoding="utf-8")]
+            types = [r["type"] for r in rows]
+            self.assertEqual(types[0], "architecture")
+            self.assertIn("step", types)
+            step_rows = [r for r in rows if r["type"] == "step"]
+            self.assertTrue(all({"loss", "lr", "tokens_per_sec"} <= r.keys() for r in step_rows))
 
     def test_finetune_runs_on_jsonl_fixture(self):
         with tempfile.TemporaryDirectory() as td:

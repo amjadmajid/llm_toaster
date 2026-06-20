@@ -112,6 +112,7 @@ class CheckpointingConfig:
 class LoggingConfig:
     log_file: str = "logs/log.txt"
     log_every_steps: int = 20
+    metrics_file: str = "logs/metrics.jsonl"  # machine-readable per-step metrics; "" disables
 
 
 @dataclass
