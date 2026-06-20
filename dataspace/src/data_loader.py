@@ -97,6 +97,13 @@ class DataLoaderLite:
             self.advance_shard()
             buf = self.tokens[self.current_position : self.current_position + B * T + 1]
 
+        if len(buf) < B * T + 1:
+            raise ValueError(
+                f"Shard '{self.shards[self.current_shard]}' has only {len(self.tokens)} tokens, "
+                f"which is fewer than B*T+1 = {B * T + 1} required for one batch (B={B}, T={T}). "
+                "Use a smaller batch_size/seq_len or larger shards."
+            )
+
         x = buf[:-1].reshape(B, T)  # inputs
         y = buf[1:].reshape(B, T)  # targets
 

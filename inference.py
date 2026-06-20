@@ -14,6 +14,7 @@ from llm_toaster.toaster.config import ConfigHandler
 from llm_toaster.toaster.generation import generate
 from llm_toaster.toaster.models.registry import build_model
 from llm_toaster.toaster.tokenizers import build_tokenizer
+from llm_toaster.toaster.training.checkpointing import load_state_dict_any
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,8 +47,8 @@ def main():
     if config.model.vocab_size is None:
         config.model.vocab_size = tokenizer.vocab_size
     model = build_model(config).to(device)
-    # Inference artifacts are plain state_dicts, so the safe loader path applies.
-    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
+    # Accepts a plain .llm state_dict or a full training checkpoint.
+    model.load_state_dict(load_state_dict_any(args.model, device))
 
     text = generate(
         model,

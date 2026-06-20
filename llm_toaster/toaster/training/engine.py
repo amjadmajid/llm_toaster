@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -167,6 +170,7 @@ class TrainingEngine:
         return checkpoint
 
     def train(self):
+        seed_everything(self.config.training.seed)
         self.setup_tokenizer()
         self.setup_model()
         self._load_base_checkpoint_for_finetune()
@@ -288,7 +292,7 @@ class TrainingEngine:
             return None
         metric = self.eval_step()
         if metric is not None:
-            logger.info("step %s validation loss %.4f", self.global_step, metric)
+            logger.info("step %s validation loss %.4f (perplexity %.2f)", self.global_step, metric, perplexity(metric))
             if self.best_metric is None or metric < self.best_metric:
                 self.best_metric = metric
                 if self.config.checkpointing.save_best:
@@ -332,3 +336,17 @@ def _build_grad_scaler(enabled: bool):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     except (AttributeError, TypeError):  # pragma: no cover - older torch fallback
         return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and torch (incl. CUDA) RNGs for reproducible runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def perplexity(loss: float) -> float:
+    """Convert a cross-entropy loss to perplexity, capped to avoid overflow."""
+    return math.exp(loss) if loss < 100 else float("inf")

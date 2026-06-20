@@ -8,7 +8,7 @@ into the newer sections for backward compatibility.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +16,10 @@ try:
     import yaml
 except ModuleNotFoundError:  # pragma: no cover - fallback for very small envs
     yaml = None
+
+
+class ConfigError(ValueError):
+    """Raised for malformed config files, with file + offending key context."""
 
 
 @dataclass
@@ -165,6 +169,7 @@ class TrainingConfig:
     data_dir: str = "dataspace/fineweb"
     num_workers: int = 1
     max_loss: float = float("inf")
+    seed: int = 1337
     device: Optional[str] = None
     vocab_size: Optional[int] = None
 
@@ -200,12 +205,37 @@ class ConfigHandler:
     @staticmethod
     def from_yaml(filepath: str) -> "ConfigHandler":
         raw = _load_yaml(filepath)
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{filepath}: top-level YAML must be a mapping of sections, got {type(raw).__name__}")
+        unknown = sorted(set(raw) - set(_SECTION_TYPES))
+        if unknown:
+            raise ConfigError(
+                f"{filepath}: unknown config section(s) {unknown}. Valid sections: {sorted(_SECTION_TYPES)}"
+            )
+
         config = ConfigHandler()
         for section_name, section_cls in _SECTION_TYPES.items():
-            if section_name in raw:
-                setattr(config, section_name, section_cls(**raw[section_name]))
+            if section_name not in raw:
+                continue
+            section_raw = raw[section_name]
+            if not isinstance(section_raw, dict):
+                raise ConfigError(
+                    f"{filepath}: section '{section_name}' must be a mapping, got {type(section_raw).__name__}"
+                )
+            valid = {f.name for f in fields(section_cls)}
+            bad = sorted(set(section_raw) - valid)
+            if bad:
+                raise ConfigError(
+                    f"{filepath}: unknown key(s) {bad} in section '{section_name}'. Valid keys: {sorted(valid)}"
+                )
+            setattr(config, section_name, section_cls(**section_raw))
+
         config.apply_backward_compatibility(raw)
-        config.validate()
+        try:
+            config.validate()
+        except (ValueError, NotImplementedError) as exc:
+            # Preserve the error type but add the file for context.
+            raise type(exc)(f"{filepath}: {exc}") from exc
         return config
 
     load = from_yaml

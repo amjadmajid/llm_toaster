@@ -88,9 +88,10 @@ The repo deliberately keeps two import paths alive. Know which one you are editi
    Generation is now unified: `inference.py`, `extract_inference_model.py`, and
    `scripts/generate.py` all build the model via `build_model`, tokenize via `build_tokenizer`,
    and sample through the single `toaster.generation.generate` helper (which calls
-   `TransformerModel.generate_text`, supporting `temperature`/`top_k`/`top_p`/`eos`). `trainer.py`
-   is a thin wrapper that builds a `ConfigHandler` and calls `TrainingEngine(config).train()`;
-   `scripts/train.py` re-invokes `trainer.main`.
+   `TransformerModel.generate_text`, supporting `temperature`/`top_k`/`top_p`/`eos`). `inference.py`
+   loads weights via `checkpointing.load_state_dict_any`, so `--model` accepts either a plain
+   `.llm` state_dict or a full training checkpoint. `trainer.py` is a thin wrapper that builds a
+   `ConfigHandler` and calls `TrainingEngine(config).train()`; `scripts/train.py` re-invokes `trainer.main`.
 
 ### Config backward-compatibility (common gotcha)
 
@@ -104,7 +105,12 @@ absent from the YAML**:
 
 So when changing model size, edit `training.*` in the legacy YAMLs (not `model.*`), or the
 mirror will not apply. `validate()` enforces invariants (e.g. `n_embd % n_head == 0`, allowed
-enum values) and raises clear `ValueError`s.
+enum values) and raises clear `ValueError`s. `from_yaml` raises `ConfigError` naming the file
+and the offending section/key for unknown sections, unknown keys, or non-mapping sections.
+
+Determinism: `TrainingEngine.train()` calls `seed_everything(training.seed)` (Python/NumPy/torch)
+at the start of every run. Checkpoints carry a `format_version` (`checkpointing.py`); loading a
+newer version raises a clear error.
 
 ### Training modes
 

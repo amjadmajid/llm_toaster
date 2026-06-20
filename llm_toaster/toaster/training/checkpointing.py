@@ -1,13 +1,23 @@
-"""Checkpoint save/load helpers for full training state."""
+"""Checkpoint save/load helpers for full training state.
+
+Checkpoint payload schema (``format_version`` 1):
+    model, optimizer, scheduler, scaler, config, global_step, tokens_seen,
+    rng_state, data_state, best_metric, git_commit, format_version.
+"""
 
 from __future__ import annotations
 
+import logging
 import random
 import subprocess
 from pathlib import Path
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
+
+CHECKPOINT_FORMAT_VERSION = 1
 
 
 def save_checkpoint(
@@ -35,6 +45,7 @@ def save_checkpoint(
         "data_state": data_state or {},
         "best_metric": best_metric,
         "git_commit": git_commit(),
+        "format_version": CHECKPOINT_FORMAT_VERSION,
     }
     torch.save(payload, path)
 
@@ -45,6 +56,12 @@ def load_checkpoint(
     # weights_only=False is required because checkpoints carry optimizer/scheduler
     # state, RNG state, and the config dict. Only load checkpoints you trust.
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    version = checkpoint.get("format_version", 1)
+    if version > CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(
+            f"Checkpoint {path} has format_version {version}, but this build only understands "
+            f"up to {CHECKPOINT_FORMAT_VERSION}. Upgrade LLM Toaster to load it."
+        )
     model.load_state_dict(checkpoint["model"], strict=strict)
     if optimizer is not None and checkpoint.get("optimizer") is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -54,6 +71,24 @@ def load_checkpoint(
         scaler.load_state_dict(checkpoint["scaler"])
     _restore_rng_state(checkpoint.get("rng_state", {}))
     return checkpoint
+
+
+def load_state_dict_any(path: str, device: str = "cpu") -> dict:
+    """Return a model state_dict from any supported artifact.
+
+    Accepts a full engine checkpoint (``{"model": ...}``), a legacy checkpoint
+    (``{"model_state_dict": ...}``), or a bare ``state_dict`` (e.g. a ``.llm``
+    inference file). Tries the safe ``weights_only`` path first.
+    """
+    try:
+        obj = torch.load(path, map_location=device, weights_only=True)
+    except Exception:
+        obj = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(obj, dict) and isinstance(obj.get("model"), dict):
+        return obj["model"]
+    if isinstance(obj, dict) and "model_state_dict" in obj:
+        return {key.replace("_orig_mod.", ""): value for key, value in obj["model_state_dict"].items()}
+    return obj
 
 
 def rotate_checkpoints(output_dir: str, pattern: str = "step_*.pt", save_total_limit: int = 3) -> None:

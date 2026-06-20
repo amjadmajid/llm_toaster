@@ -4,9 +4,11 @@ These tests intentionally avoid importing torch so they run in minimal
 environments; ConfigHandler only touches torch lazily for device detection.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from llm_toaster.toaster.config import ConfigHandler
+from llm_toaster.toaster.config import ConfigError, ConfigHandler
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -76,9 +78,6 @@ class BackwardCompatibilityTests(unittest.TestCase):
         self.assertEqual(config.tokenizer.type, "tiktoken")
 
     def test_roundtrip_to_yaml_reloads(self):
-        import tempfile
-        from pathlib import Path
-
         config = ConfigHandler.from_yaml("config/default_config.yaml")
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "cfg.yaml"
@@ -86,6 +85,42 @@ class BackwardCompatibilityTests(unittest.TestCase):
             reloaded = ConfigHandler.from_yaml(str(path))
             self.assertEqual(reloaded.model.n_embd, config.model.n_embd)
             self.assertEqual(reloaded.training.mode, config.training.mode)
+
+
+class ConfigLoadingErrorTests(unittest.TestCase):
+    def _write(self, td, text):
+        path = Path(td) / "cfg.yaml"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_unknown_section_names_the_section(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "nonsense:\n  x: 1\n")
+            with self.assertRaises(ConfigError) as ctx:
+                ConfigHandler.from_yaml(path)
+            self.assertIn("nonsense", str(ctx.exception))
+
+    def test_unknown_key_names_key_and_section(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "training:\n  batch_size: 2\n  bogus_key: 1\n")
+            with self.assertRaises(ConfigError) as ctx:
+                ConfigHandler.from_yaml(path)
+            message = str(ctx.exception)
+            self.assertIn("bogus_key", message)
+            self.assertIn("training", message)
+
+    def test_non_mapping_section_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "training: 5\n")
+            with self.assertRaises(ConfigError):
+                ConfigHandler.from_yaml(path)
+
+    def test_validation_error_includes_filepath(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "training:\n  n_embd: 10\n  n_head: 3\n")
+            with self.assertRaises(ValueError) as ctx:
+                ConfigHandler.from_yaml(path)
+            self.assertIn(path, str(ctx.exception))
 
 
 if __name__ == "__main__":
