@@ -133,6 +133,20 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
     logger.info("Tokenization complete and data saved.")
 
 
+def _resolve_output_dir(tokenized_data: str) -> Path:
+    """Resolve a relative output dir against the repo root, not the CWD.
+
+    Running this script from inside dataspace/src used to write shards to
+    dataspace/src/dataspace/fineweb; anchoring to the repo root keeps them in
+    the configured dataspace/fineweb regardless of the working directory.
+    """
+    output_dir = Path(tokenized_data)
+    if output_dir.is_absolute():
+        return output_dir
+    repo_root = Path(__file__).resolve().parents[2]
+    return repo_root / output_dir
+
+
 if __name__ == "__main__":
     data_config = DataConfig()
 
@@ -140,7 +154,7 @@ if __name__ == "__main__":
         dataset_name=data_config.dataset_name,
         remote_name=data_config.remote_name,
         split_ratio=data_config.split_ratio,
-        output_dir=data_config.tokenized_data,
+        output_dir=str(_resolve_output_dir(data_config.tokenized_data)),
         shard_size=data_config.shard_size,
     )
 

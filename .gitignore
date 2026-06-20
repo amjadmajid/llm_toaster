@@ -1,5 +1,6 @@
 dataspace/fineweb/
 dataspace/tokenized_data/
+dataspace/src/dataspace/
 
 *.egg-info
 __pycache__

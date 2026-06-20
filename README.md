@@ -17,11 +17,11 @@ All configurations can be found in the `llm_toaster/config` directory. Ensure to
 
 ## Training
 ### Step 1) data download and tokenization
-To download and tokenize the [fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) dataset from Hugging Face, navigate to the `dataspace/src` directory and run:
+First install the data extra: `pip install -e ".[data]"`. Then, from the repository root, run:
 ```bash
-python download_tokenize_hf.py
+python dataspace/src/download_tokenize_hf.py
 ```
-This command will take a file to download and tokenize about 27GB (after tokenization, the size will be reduced to about 10GB)
+This downloads and tokenizes about 27GB (reduced to about 10GB after tokenization). The script resolves output paths from the repo root, so shards always land in `dataspace/fineweb/` regardless of the directory you run it from.
 
 ### Step 2) Training
 To train the model, navigate to the `llm_toaster` directory and run:
