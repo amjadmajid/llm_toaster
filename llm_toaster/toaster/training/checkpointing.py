@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import subprocess
 from pathlib import Path
@@ -40,7 +39,11 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def load_checkpoint(path: str, model, optimizer=None, scheduler=None, scaler=None, device: str = "cpu", strict: bool = True) -> dict:
+def load_checkpoint(
+    path: str, model, optimizer=None, scheduler=None, scaler=None, device: str = "cpu", strict: bool = True
+) -> dict:
+    # weights_only=False is required because checkpoints carry optimizer/scheduler
+    # state, RNG state, and the config dict. Only load checkpoints you trust.
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"], strict=strict)
     if optimizer is not None and checkpoint.get("optimizer") is not None:

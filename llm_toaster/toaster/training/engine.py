@@ -16,7 +16,8 @@ from ..models.registry import build_model
 from ..peft.lora import inject_lora, lora_state_dict
 from ..tokenizers import build_tokenizer
 from .checkpointing import load_checkpoint as load_training_checkpoint
-from .checkpointing import rotate_checkpoints, save_checkpoint as save_training_checkpoint
+from .checkpointing import rotate_checkpoints
+from .checkpointing import save_checkpoint as save_training_checkpoint
 from .optim import build_optimizer, build_scheduler
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class TrainingEngine:
         self.scaler = None
         self.train_loader = None
         self.val_loader = None
+        self._configure_file_logging()
 
     def setup_tokenizer(self):
         self.tokenizer = build_tokenizer(self.config)
@@ -73,8 +75,20 @@ class TrainingEngine:
         self.scheduler = build_scheduler(self.optimizer, self.config)
         return self.scheduler
 
+    def setup_scaler(self):
+        """Create a GradScaler that is only active for CUDA fp16 training.
+
+        fp16 autocast needs loss scaling to avoid gradient underflow/NaNs; bf16
+        and CPU paths do not, so the scaler is created disabled there and acts as
+        a transparent passthrough around ``scale``/``step``/``update``.
+        """
+        self.scaler = _build_grad_scaler(self._use_fp16())
+        return self.scaler
+
     def train_step(self) -> float:
         self.model.train()
+        if self.scaler is None:
+            self.setup_scaler()
         self.optimizer.zero_grad(set_to_none=True)
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
         total_loss = 0.0
@@ -87,15 +101,17 @@ class TrainingEngine:
                 logits = self.model(x)
                 loss = criterion(logits.view(-1, logits.size(-1)), y.view(-1))
                 loss = loss / self.config.training.n_batches
-            loss.backward()
+            self.scaler.scale(loss).backward()
             total_loss += float(loss.detach().cpu())
             self.tokens_seen += x.numel()
             self.current_shard = shard
 
         trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if trainable_parameters:
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_parameters, max_norm=1.0)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
         self.scheduler.step()
         self.global_step += 1
         return total_loss
@@ -157,6 +173,7 @@ class TrainingEngine:
         self.setup_dataloaders()
         self.setup_optimizer()
         self.setup_scheduler()
+        self.setup_scaler()
         self._resume_if_requested()
 
         while self.global_step < self.config.training.max_iter:
@@ -225,6 +242,31 @@ class TrainingEngine:
         dtype = torch.float16 if self.config.distributed.mixed_precision == "fp16" else torch.bfloat16
         return torch.autocast(device_type="cuda", dtype=dtype, enabled=enabled)
 
+    def _use_fp16(self) -> bool:
+        return "cuda" in str(self.device) and self.config.distributed.mixed_precision == "fp16"
+
+    def _configure_file_logging(self) -> None:
+        """Route engine logs to ``logging.log_file`` via a root FileHandler.
+
+        Idempotent: a handler is only added once per log file even when several
+        engines are constructed in the same process.
+        """
+        log_file = self.config.logging.log_file
+        if not log_file:
+            return
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        target = str(path.resolve())
+        root = logging.getLogger()
+        for handler in root.handlers:
+            if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == target:
+                return
+        handler = logging.FileHandler(path)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(handler)
+        if root.level == logging.NOTSET or root.level > logging.INFO:
+            root.setLevel(logging.INFO)
+
     def _load_base_checkpoint_for_finetune(self) -> None:
         if not self.is_finetune_mode or not self.config.finetune.base_ckpt:
             return
@@ -282,3 +324,11 @@ class TrainingEngine:
         config_path = self.config.finetune.output_config if self.is_finetune_mode else self.config.training.ckpt_config
         if config_path:
             self.config.to_yaml(config_path)
+
+
+def _build_grad_scaler(enabled: bool):
+    """Construct a GradScaler across torch versions (new ``torch.amp`` API first)."""
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):  # pragma: no cover - older torch fallback
+        return torch.cuda.amp.GradScaler(enabled=enabled)

@@ -1,9 +1,11 @@
-import torch
-import logging
 import datetime
+import logging
 from pathlib import Path
 
+import torch
+
 logger = logging.getLogger(__name__)
+
 
 def count_parameters(model):
     """
@@ -17,20 +19,20 @@ def count_parameters(model):
     """
     return f"{round(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1000_000, 2)}M"
 
+
 def save_model(model, optimizer, scaler, path):
     """Save the model, optimizer, and scaler state to a file."""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         checkpoint = {
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scaler_state_dict': scaler.state_dict()
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
         }
         torch.save(checkpoint, path)
     except Exception as e:
         logger.error(f"Error saving model, optimizer, and scaler: {e}")
         raise
-
 
 
 def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
@@ -45,16 +47,19 @@ def load_checkpoint_(model, optimizer, scaler, path, device, inference=False):
         device (str): Device to load the model onto.
     """
     try:
-        checkpoint = torch.load(path, map_location=device)
+        # Inference loads only tensors (the model weights), so it can use the
+        # safe weights_only path. Full-state loads also restore optimizer/scaler
+        # objects and therefore require the trusted (weights_only=False) path.
+        checkpoint = torch.load(path, map_location=device, weights_only=inference)
         # Load model state dict
-        state_dict = checkpoint['model_state_dict']
+        state_dict = checkpoint["model_state_dict"]
         new_state_dict = {key.replace("_orig_mod.", ""): value for key, value in state_dict.items()}
         model.load_state_dict(new_state_dict)
         # Load optimizer state dict
-        if not inference: 
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if not inference:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             # Load scaler state dict
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
     except Exception as e:
         logger.error(f"Error loading model, optimizer, and scaler: {e}")
         raise
@@ -77,11 +82,13 @@ def evaluate_model(model, dataset, criterion, config):
     model.train()
     return val_loss / eval_iter
 
+
 def _format_time(seconds):
     """Format time in seconds to hours, minutes, and seconds."""
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{int(hours):04d}h {int(minutes):02d}m {int(seconds):02d}s"
+
 
 # def setup_logging(log_file):
 #     # Create a custom logger
@@ -109,7 +116,7 @@ def _format_time(seconds):
 def training_logs(iteration, config, loss, iteration_duration, training_duration):
     # Get current time with milliseconds
     now = datetime.datetime.now()
-    timestamp = now.strftime('%Y-%m-%d %H:%M:%S') + f",{int(now.microsecond / 1000):03d}"
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S") + f",{int(now.microsecond / 1000):03d}"
 
     formatted_td = _format_time(training_duration)
     processed_tokens = config.batch_size * config.seq_len * config.n_batches
@@ -119,17 +126,20 @@ def training_logs(iteration, config, loss, iteration_duration, training_duration
     iteration_time_ms = iteration_duration * 1000  # Convert to milliseconds
 
     # Create the message
-    message = (f"Iteration {iteration} | Train Loss {loss:.5f} | Training Time: {formatted_td} | "
-               f"Iteration Time: {iteration_time_ms:.3f} ms | {tokens_per_sec:.1f} tokens/sec")
+    message = (
+        f"Iteration {iteration} | Train Loss {loss:.5f} | Training Time: {formatted_td} | "
+        f"Iteration Time: {iteration_time_ms:.3f} ms | {tokens_per_sec:.1f} tokens/sec"
+    )
 
     # Combine all parts into the final log string
     log_str = f"{timestamp} - {message} \n"
 
     return log_str
 
+
 def write_logs(file, logs, append_txt=True):
 
     Path(file).parent.mkdir(parents=True, exist_ok=True)
-    with open(file, 'a' if append_txt else 'w') as f:
+    with open(file, "a" if append_txt else "w") as f:
         f.write(logs)
         f.flush()
