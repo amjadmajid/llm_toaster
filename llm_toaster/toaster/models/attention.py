@@ -31,6 +31,7 @@ class MultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(config.n_embd, kv_width)
         self.v_proj = nn.Linear(config.n_embd, kv_width)
         self.o_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.o_proj._is_residual_projection = True  # depth-scaled init (GPT-2 style)
         self.dropout = nn.Dropout(attention_config.dropout or config.dropout_rate)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

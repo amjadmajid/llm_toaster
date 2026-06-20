@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -43,6 +45,18 @@ class TransformerModel(nn.Module):
         self.lm_head = nn.Linear(model_config.n_embd, vocab_size, bias=False)
         if model_config.tie_embeddings:
             self.lm_head.weight = self.token_embeddings.weight
+        self._init_parameters(model_config.n_blocks)
+
+    def _init_parameters(self, n_blocks: int) -> None:
+        """GPT-2 style init: N(0, 0.02) weights, zero biases, with residual output
+        projections additionally scaled by 1/sqrt(2*n_blocks) so the residual stream
+        doesn't blow up with depth. Default PyTorch init (embeddings ~N(0,1)) makes the
+        starting loss far exceed ln(vocab); this brings it down to ~ln(vocab)."""
+        self.apply(_init_weights)
+        residual_std = 0.02 / math.sqrt(2 * n_blocks)
+        for module in self.modules():
+            if getattr(module, "_is_residual_projection", False):
+                nn.init.normal_(module.weight, mean=0.0, std=residual_std)
 
     def forward(self, input_indices: torch.Tensor) -> torch.Tensor:
         _batch, seq_len = input_indices.shape
@@ -100,3 +114,12 @@ def _filter_top_p(logits: torch.Tensor, top_p: float | None) -> torch.Tensor:
     remove = cumulative - torch.softmax(sorted_logits, dim=-1) > top_p
     sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
     return torch.full_like(logits, float("-inf")).scatter(-1, sorted_indices, sorted_logits)
+
+
+def _init_weights(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)

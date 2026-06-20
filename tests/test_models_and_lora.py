@@ -45,6 +45,15 @@ class ModelMatrixTests(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             build_model(_tiny_config(position="rope"))
 
+    def test_gpt_style_init_uses_small_std(self):
+        # Default PyTorch init gives embeddings std ~1.0; GPT-style init must be ~0.02.
+        config = _tiny_config(n_blocks=2)
+        model = build_model(config)
+        self.assertLess(float(model.token_embeddings.weight.detach().std()), 0.1)
+        # Residual output projections are scaled down further (0.02 / sqrt(2*n_blocks)).
+        o_proj = model.TransformerBlocks[0].attention.o_proj
+        self.assertLess(float(o_proj.weight.detach().std()), 0.02)
+
 
 class LoRATests(unittest.TestCase):
     def test_inject_freezes_base_and_exposes_adapters(self):

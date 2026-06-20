@@ -9,10 +9,12 @@ import torch.nn as nn
 class GELUFFN(nn.Module):
     def __init__(self, n_embd: int, dropout: float = 0.0):
         super().__init__()
+        out_proj = nn.Linear(4 * n_embd, n_embd)
+        out_proj._is_residual_projection = True  # depth-scaled init (GPT-2 style)
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
             nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd),
+            out_proj,
             nn.Dropout(dropout),
         )
 
@@ -27,6 +29,7 @@ class SwiGLUFFN(nn.Module):
         self.gate = nn.Linear(n_embd, hidden)
         self.up = nn.Linear(n_embd, hidden)
         self.down = nn.Linear(hidden, n_embd)
+        self.down._is_residual_projection = True  # depth-scaled init (GPT-2 style)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
