@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff==0.15.18 mypy
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Mypy (advisory)
+        run: mypy llm_toaster/toaster
+        continue-on-error: true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # CPU-only torch keeps CI light; install it first so the editable install
+      # below sees the requirement already satisfied.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      # Editable install with the dev extra (also smoke-tests the pyproject packaging).
+      # The heavy `data` extra (datasets/tqdm) is intentionally omitted; tests don't need it.
+      - run: pip install -e ".[dev]"
+      - name: Pytest with coverage gate
+        run: pytest --cov --cov-report=term-missing

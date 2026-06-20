@@ -14,3 +14,16 @@ logs/*.txt
 
 model/babyGPT/*.llm
 .vscode
+
+# Python virtual environments
+.venv/
+venv/
+.verify_venv/
+
+# Test / lint tooling caches and reports
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
