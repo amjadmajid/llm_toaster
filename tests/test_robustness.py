@@ -10,12 +10,13 @@ import torch
 
 from llm_toaster.toaster.config import ConfigHandler
 from llm_toaster.toaster.models.registry import build_model
+from llm_toaster.toaster.peft.lora import inject_lora
 from llm_toaster.toaster.training.checkpointing import (
     CHECKPOINT_FORMAT_VERSION,
     load_state_dict_any,
     save_checkpoint,
 )
-from llm_toaster.toaster.training.engine import perplexity, seed_everything
+from llm_toaster.toaster.training.engine import model_size_summary, perplexity, seed_everything
 
 
 def _tiny_config():
@@ -36,6 +37,20 @@ class SeedTests(unittest.TestCase):
         torch_b, numpy_b = torch.rand(4), np.random.rand(3)
         self.assertTrue(torch.equal(torch_a, torch_b))
         self.assertTrue(np.allclose(numpy_a, numpy_b))
+
+
+class ModelSizeTests(unittest.TestCase):
+    def test_summary_reports_total_and_trainable_drop_with_lora(self):
+        model = build_model(_tiny_config())
+        total = sum(p.numel() for p in model.parameters())
+        summary = model_size_summary(model)
+        self.assertIsInstance(summary, str)
+        self.assertIn(f"{total:,}", summary)
+
+        inject_lora(model, ConfigHandler().peft)
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.assertLess(trainable, total)
+        self.assertIn(f"{trainable:,} trainable", model_size_summary(model))
 
 
 class PerplexityTests(unittest.TestCase):

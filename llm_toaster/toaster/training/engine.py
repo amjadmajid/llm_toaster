@@ -173,6 +173,7 @@ class TrainingEngine:
         seed_everything(self.config.training.seed)
         self.setup_tokenizer()
         self.setup_model()
+        logger.info("model: %s", model_size_summary(self.model))
         self._load_base_checkpoint_for_finetune()
         self.setup_dataloaders()
         self.setup_optimizer()
@@ -350,3 +351,12 @@ def seed_everything(seed: int) -> None:
 def perplexity(loss: float) -> float:
     """Convert a cross-entropy loss to perplexity, capped to avoid overflow."""
     return math.exp(loss) if loss < 100 else float("inf")
+
+
+def model_size_summary(model) -> str:
+    """One-line parameter summary; fp32 weight memory since weights are held in fp32."""
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return (
+        f"{total / 1e6:.1f}M params ({total:,} total | {trainable:,} trainable), ~{total * 4 / 1e6:.0f} MB fp32 weights"
+    )
