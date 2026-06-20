@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-toaster"
+version = "0.5.0"
+description = "Educational library for pretraining, fine-tuning, and inference of GPT-style Transformers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Amjad Majid", email = "amjd.y.majid@gmail.com" }]
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "tiktoken>=0.5",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Heavy, only needed by the Hugging Face download/tokenize pipeline.
+data = ["datasets>=2.0", "tqdm>=4.0"]
+# Hugging Face tokenizer backend (tokenizer.type: hf).
+hf = ["transformers>=4.0"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff==0.15.18", "mypy>=1.0", "pre-commit>=3"]
+
+[tool.setuptools.packages.find]
+# Mirrors the previous find_packages() set, minus tests.
+include = ["llm_toaster*", "config*", "dataspace*", "model*", "tokenizer_lib*", "utils*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Start with high-signal, low-churn rules: pyflakes (F), syntax errors (E9),
+# and import sorting (I). Style/formatting is handled by `ruff format`.
+select = ["E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Re-export surfaces: names are imported to be exported, not used locally.
+"__init__.py" = ["F401", "F403"]
+"config/config_handler.py" = ["F403"]
+"model/model.py" = ["F401"]
+
+[tool.coverage.run]
+source = ["llm_toaster"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+# Coverage of the modular engine package; raise this as the suite grows.
+fail_under = 80
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = false
+# Advisory only for now (run non-blocking in CI); tighten in a later phase.
+check_untyped_defs = false

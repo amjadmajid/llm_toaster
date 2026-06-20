@@ -231,28 +231,77 @@ class ConfigHandler:
             self.tokenizer.type = "tiktoken" if self.training.tokenizer_type == "gpt2" else self.training.tokenizer_type
 
     def validate(self) -> None:
-        _require(self.training.mode in {"pretrain", "finetune", "sft"}, "training.mode must be pretrain, finetune, or sft")
+        _require(
+            self.training.mode in {"pretrain", "finetune", "sft"}, "training.mode must be pretrain, finetune, or sft"
+        )
         _require(self.training.batch_size > 0, "training.batch_size must be positive")
         _require(self.training.seq_len > 0, "training.seq_len must be positive")
         _require(self.training.n_batches > 0, "training.n_batches must be positive")
-        _require(self.training.max_iter >= self.training.training_step, "training.max_iter must be >= training.training_step")
+        _require(
+            self.training.max_iter >= self.training.training_step, "training.max_iter must be >= training.training_step"
+        )
         _require(self.model.n_embd % self.model.n_head == 0, "model.n_embd must be divisible by model.n_head")
         if self.model.num_key_value_heads is not None:
-            _require(self.model.n_head % self.model.num_key_value_heads == 0, "model.n_head must be divisible by model.num_key_value_heads")
+            _require(
+                self.model.n_head % self.model.num_key_value_heads == 0,
+                "model.n_head must be divisible by model.num_key_value_heads",
+            )
         _require(self.model.norm in {"layernorm", "rmsnorm"}, "model.norm must be layernorm or rmsnorm")
         _require(self.model.ffn in {"gelu", "geglu", "swiglu", "moe"}, "model.ffn must be gelu, geglu, swiglu, or moe")
         _require(self.model.position in {"learned", "rope"}, "model.position must be learned or rope")
         _require(self.optimizer.name in {"adamw", "fused_adamw"}, "optimizer.name must be adamw or fused_adamw")
         _require(self.scheduler.name in {"constant", "cosine"}, "scheduler.name must be constant or cosine")
-        _require(self.attention.backend in {"eager", "sdpa", "sdpa_auto", "sdpa_flash", "sdpa_mem_efficient", "sdpa_math", "flash_attn_2", "xformers"}, "unknown attention.backend")
-        _require(self.distributed.backend in {"none", "accelerate", "ddp"}, "distributed.backend must be none, accelerate, or ddp")
-        _require(self.distributed.mixed_precision in {"no", "fp16", "bf16"}, "distributed.mixed_precision must be no, fp16, or bf16")
+        _require(
+            self.attention.backend
+            in {
+                "eager",
+                "sdpa",
+                "sdpa_auto",
+                "sdpa_flash",
+                "sdpa_mem_efficient",
+                "sdpa_math",
+                "flash_attn_2",
+                "xformers",
+            },
+            "unknown attention.backend",
+        )
+        _require(
+            self.distributed.backend in {"none", "accelerate", "ddp"},
+            "distributed.backend must be none, accelerate, or ddp",
+        )
+        _require(
+            self.distributed.mixed_precision in {"no", "fp16", "bf16"},
+            "distributed.mixed_precision must be no, fp16, or bf16",
+        )
         _require(self.peft.method == "lora", "only peft.method=lora is currently supported")
         _require(self.peft.r > 0, "peft.r must be positive")
         _require(self.checkpointing.save_every_steps > 0, "checkpointing.save_every_steps must be positive")
         _require(self.checkpointing.save_total_limit > 0, "checkpointing.save_total_limit must be positive")
+        self._reject_unimplemented()
+
+    def _reject_unimplemented(self) -> None:
+        """Reject options the engine validates but does not yet implement.
+
+        These are spelled correctly (so they pass the enum checks above) but have
+        no working code path. Failing here at config load is far clearer than a
+        surprise crash or, worse, silently running a single-process job for a
+        config that asked for distributed training.
+        """
         if self.attention.sliding_window is not None:
             raise NotImplementedError("attention.sliding_window is reserved for future work and is not implemented yet")
+        if self.distributed.backend != "none":
+            raise NotImplementedError(
+                f"distributed.backend={self.distributed.backend!r} is not implemented; "
+                "training is single-process only. Use distributed.backend='none'."
+            )
+        if self.model.ffn == "moe":
+            raise NotImplementedError("model.ffn='moe' is reserved but not implemented yet")
+        if self.model.position == "rope":
+            raise NotImplementedError("model.position='rope' is reserved but not implemented yet")
+        if self.attention.backend in {"flash_attn_2", "xformers"}:
+            raise NotImplementedError(f"attention.backend={self.attention.backend!r} integration is not wired yet")
+        if self.tokenizer.type in {"sp", "sentencepiece"}:
+            raise NotImplementedError("tokenizer.type='sentencepiece' is a stub and not implemented yet")
 
     def to_dict(self) -> dict:
         return asdict(self)
