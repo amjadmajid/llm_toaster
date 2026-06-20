@@ -61,6 +61,7 @@ class TransformerModel(nn.Module):
         max_length: int,
         temperature: float = 1.0,
         top_k: int | None = None,
+        top_p: float | None = None,
         eos_token_id: int | None = None,
     ) -> torch.Tensor:
         if temperature <= 0:
@@ -71,9 +72,8 @@ class TransformerModel(nn.Module):
         try:
             for _ in range(max_length):
                 logits = self(generated[:, -self.seq_len :])[:, -1, :] / temperature
-                if top_k is not None and top_k > 0:
-                    values = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1).values
-                    logits = logits.masked_fill(logits < values[:, [-1]], float("-inf"))
+                logits = _filter_top_k(logits, top_k)
+                logits = _filter_top_p(logits, top_p)
                 probs = torch.softmax(logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
                 generated = torch.cat([generated, next_token], dim=1)
@@ -82,3 +82,21 @@ class TransformerModel(nn.Module):
         finally:
             self.train(was_training)
         return generated
+
+
+def _filter_top_k(logits: torch.Tensor, top_k: int | None) -> torch.Tensor:
+    if top_k is None or top_k <= 0:
+        return logits
+    values = torch.topk(logits, min(top_k, logits.size(-1)), dim=-1).values
+    return logits.masked_fill(logits < values[:, [-1]], float("-inf"))
+
+
+def _filter_top_p(logits: torch.Tensor, top_p: float | None) -> torch.Tensor:
+    if top_p is None or not 0.0 < top_p < 1.0:
+        return logits
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    cumulative = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+    # Drop tokens once the cumulative mass exceeds top_p, but always keep the first.
+    remove = cumulative - torch.softmax(sorted_logits, dim=-1) > top_p
+    sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
+    return torch.full_like(logits, float("-inf")).scatter(-1, sorted_indices, sorted_logits)

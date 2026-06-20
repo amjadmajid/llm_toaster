@@ -1,35 +1,30 @@
+"""Run inference on a trained LLM Toaster model.
+
+Uses the same model registry and tokenizer as training (via the modular engine)
+so a model produced by ``extract_inference_model.py`` loads and tokenizes
+identically here.
+"""
+
 import argparse
 import logging
-from pathlib import Path
 
-import numpy as np
 import torch
 
-from config import ConfigHandler
-from model import TransformerModel
-from tokenizer_lib import gpt2_decode, gpt2_encode, init_gpt2_tokenizer
+from llm_toaster.toaster.config import ConfigHandler
+from llm_toaster.toaster.generation import generate
+from llm_toaster.toaster.models.registry import build_model
+from llm_toaster.toaster.tokenizers import build_tokenizer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def inference(config, model, prompt, *, max_new_tokens=None, temperature=1.0, top_k=35, top_p=None):
-    model.eval()
-    init_gpt2_tokenizer()
-    input_ids = gpt2_encode(prompt, dtype=np.int32)
-    input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(config.training.device)
-    if input_ids.size(1) > config.training.seq_len:
-        input_ids = input_ids[:, -config.training.seq_len:]
-        print(f"Input truncated to the last {config.training.seq_len} tokens.")
-    with torch.no_grad():
-        output = model.generate_text(
-            input_ids,
-            max_length=max_new_tokens or config.inference.generate_max_length,
-            topk=top_k,
-            temperature=temperature,
-            top_p=top_p,
-        )
-    print(gpt2_decode(output[0].cpu().tolist(), require_eot=False))
+def _default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def main():
@@ -44,27 +39,27 @@ def main():
     args = parser.parse_args()
 
     config = ConfigHandler.from_yaml(args.config)
-    config.training.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    model = TransformerModel(
-        n_head=config.training.n_head,
-        vocab_size=config.training.vocab_size or 50304,
-        n_embd=config.training.n_embd,
-        seq_len=config.training.seq_len,
-        device=config.training.device,
-        dropout_rate=config.training.dropout_rate,
-        n_blocks=config.training.n_blocks,
-        decoder=True,
-    ).to(config.training.device)
-    model.load_state_dict(torch.load(Path(args.model), map_location=config.training.device))
-    inference(
-        config,
+    device = _default_device()
+    config.training.device = device
+
+    tokenizer = build_tokenizer(config)
+    if config.model.vocab_size is None:
+        config.model.vocab_size = tokenizer.vocab_size
+    model = build_model(config).to(device)
+    # Inference artifacts are plain state_dicts, so the safe loader path applies.
+    model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
+
+    text = generate(
         model,
+        tokenizer,
         args.prompt,
-        max_new_tokens=args.max_new_tokens,
+        device,
+        max_new_tokens=args.max_new_tokens or config.inference.generate_max_length,
         temperature=args.temperature,
         top_k=args.top_k if args.top_k > 0 else None,
         top_p=args.top_p,
     )
+    print(text)
 
 
 if __name__ == "__main__":

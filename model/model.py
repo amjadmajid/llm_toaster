@@ -1,8 +1,23 @@
-"""Backward-compatible model imports for the original repository layout."""
+"""Deprecated compatibility layer for the original top-level model package.
+
+The canonical model now lives in ``llm_toaster.toaster.models.transformer`` and is
+built through ``llm_toaster.toaster.models.registry.build_model``. This shim only
+remains so external code using the historical ``from model import TransformerModel``
+positional constructor keeps working; new code should use the registry.
+"""
+
+import warnings
 
 from llm_toaster.toaster.config.schema import AttentionConfig, ModelConfig
 from llm_toaster.toaster.models.attention import MultiHeadAttention
-from llm_toaster.toaster.models.transformer import TransformerBlock, TransformerModel as _TransformerModel
+from llm_toaster.toaster.models.transformer import TransformerBlock
+from llm_toaster.toaster.models.transformer import TransformerModel as _TransformerModel
+
+warnings.warn(
+    "model.TransformerModel is deprecated; build models via llm_toaster.toaster.models.registry.build_model instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class TransformerModel(_TransformerModel):

@@ -7,11 +7,10 @@ import argparse
 import sys
 from pathlib import Path
 
-import torch
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llm_toaster.toaster.config import ConfigHandler
+from llm_toaster.toaster.generation import generate
 from llm_toaster.toaster.training.engine import TrainingEngine
 
 
@@ -23,6 +22,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=35)
+    parser.add_argument("--top-p", type=float, default=None)
     args = parser.parse_args()
 
     config = ConfigHandler.from_yaml(args.config)
@@ -32,15 +32,18 @@ def main() -> None:
     checkpoint = args.checkpoint or engine.default_checkpoint_path
     if Path(checkpoint).exists():
         engine.load_checkpoint(checkpoint)
-    ids = torch.tensor([tokenizer.encode(args.prompt)], dtype=torch.long, device=engine.device)
-    out = model.generate_text(
-        ids,
-        args.max_new_tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        eos_token_id=tokenizer.eos_token_id,
+    print(
+        generate(
+            model,
+            tokenizer,
+            args.prompt,
+            engine.device,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k if args.top_k > 0 else None,
+            top_p=args.top_p,
+        )
     )
-    print(tokenizer.decode(out[0].detach().cpu().tolist()))
 
 
 if __name__ == "__main__":
