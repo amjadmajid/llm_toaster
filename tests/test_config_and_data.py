@@ -8,6 +8,7 @@ except ModuleNotFoundError:  # pragma: no cover - dependency guard for minimal C
     np = None
 
 from config import ConfigHandler
+
 if np is not None:
     from dataspace.src.data_loader import InstructionDataLoader
 else:

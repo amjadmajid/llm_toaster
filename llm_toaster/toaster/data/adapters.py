@@ -228,13 +228,22 @@ def _preference_dpo(row: dict, _tok=None) -> FormattedExample:
 
 
 def _simple_chat_template(messages: list[dict]) -> str:
-    return "".join(f"{message.get('role', 'user')}: {message.get('content', '')}\n" for message in messages) + "assistant: "
+    return (
+        "".join(f"{message.get('role', 'user')}: {message.get('content', '')}\n" for message in messages)
+        + "assistant: "
+    )
 
 
 DataAdapterRegistry.register(DataAdapter("text", lambda row: "text" in row, _text))
-DataAdapterRegistry.register(DataAdapter("prompt_completion", lambda row: {"prompt", "completion"}.issubset(row), _prompt_completion))
-DataAdapterRegistry.register(DataAdapter("instruction_response", lambda row: {"instruction", "response"}.issubset(row), _instruction_response))
+DataAdapterRegistry.register(
+    DataAdapter("prompt_completion", lambda row: {"prompt", "completion"}.issubset(row), _prompt_completion)
+)
+DataAdapterRegistry.register(
+    DataAdapter("instruction_response", lambda row: {"instruction", "response"}.issubset(row), _instruction_response)
+)
 DataAdapterRegistry.register(DataAdapter("alpaca", lambda row: {"instruction", "output"}.issubset(row), _alpaca))
 DataAdapterRegistry.register(DataAdapter("openai_messages", lambda row: "messages" in row, _openai_messages))
 DataAdapterRegistry.register(DataAdapter("sharegpt", lambda row: "conversations" in row, _sharegpt))
-DataAdapterRegistry.register(DataAdapter("preference_dpo", lambda row: {"prompt", "chosen", "rejected"}.issubset(row), _preference_dpo))
+DataAdapterRegistry.register(
+    DataAdapter("preference_dpo", lambda row: {"prompt", "chosen", "rejected"}.issubset(row), _preference_dpo)
+)

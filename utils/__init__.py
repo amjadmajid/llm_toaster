@@ -1,2 +1,1 @@
-from .utils import evaluate_model, save_model, load_checkpoint_, count_parameters
-from .utils import training_logs,  write_logs
+from .utils import count_parameters, evaluate_model, load_checkpoint_, save_model, training_logs, write_logs

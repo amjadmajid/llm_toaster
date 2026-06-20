@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import time
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -27,7 +27,12 @@ def main() -> None:
         config.attention.backend = backend
         config.model.vocab_size = config.model.vocab_size or 50304
         model = build_model(config).to(config.training.device)
-        x = torch.randint(0, config.model.vocab_size, (config.training.batch_size, config.training.seq_len), device=config.training.device)
+        x = torch.randint(
+            0,
+            config.model.vocab_size,
+            (config.training.batch_size, config.training.seq_len),
+            device=config.training.device,
+        )
         start = time.perf_counter()
         for _ in range(args.iters):
             _ = model(x)

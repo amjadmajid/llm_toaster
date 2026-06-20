@@ -19,7 +19,9 @@ from llm_toaster.toaster.tokenizers import build_tokenizer
 def main() -> None:
     parser = argparse.ArgumentParser(description="Tokenize a text or JSONL dataset into LLM Toaster shards.")
     parser.add_argument("--config", default="config/default_config.yaml")
-    parser.add_argument("--input", required=True, help="Input .txt or .jsonl file. JSONL rows may contain a text field.")
+    parser.add_argument(
+        "--input", required=True, help="Input .txt or .jsonl file. JSONL rows may contain a text field."
+    )
     parser.add_argument("--output-dir", default=None, help="Output shard directory; defaults to training.data_dir.")
     parser.add_argument("--val-ratio", type=float, default=0.05)
     args = parser.parse_args()
