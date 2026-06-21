@@ -89,3 +89,37 @@ editable finder, so it gets its own stage with the same import/compile/pytest ch
 two-token-ahead bug exists.
 
 **Verified:** new tests pass; full suite **86 passed**; `compileall` clean.
+
+## Stage 4 — checkpoint / resume reliability (issues #6, #9)
+
+**Production changes**
+- `training/checkpointing.py`: new `atomic_save(payload, path)` — writes to a temp file in the same
+  directory, `flush` + `os.fsync`, then `os.replace` (atomic). `save_checkpoint` now uses it, so an
+  interruption mid-write can never corrupt the live checkpoint and never leaves a partial `.tmp_ckpt_*`
+  behind. Payload gains `wall_clock_s` (cumulative elapsed seconds) and `tokenizer_info` (special-token
+  ids + vocab) (#9, #6).
+- `training/engine.py`:
+  - Tracks cumulative elapsed **seconds** across resumes via `perf_counter` deltas (`wall_clock_s`,
+    `_elapsed_seconds_total`) — restored from the checkpoint, persisted on save, and reported as the
+    `elapsed_s`/`eta_s` metrics. No wall-clock timestamps are used as duration (#6).
+  - SIGINT/SIGTERM handling: a handler **requests** a graceful stop (sets a flag); the loop then saves
+    a *consistent* emergency checkpoint (`<output_dir>/emergency.pt`) at the next step boundary and
+    stops — avoiding a save mid-optimizer-step. A second interrupt restores the default handler and
+    force-quits. A `KeyboardInterrupt` caught around the loop also triggers the emergency save. Handlers
+    are installed only on the main thread and always restored in `finally` (#9).
+  - `save_checkpoint`/`_save_step_checkpoint` pass `wall_clock_s` + `tokenizer_info` through.
+
+**Decisions / notes**
+- Duration = elapsed seconds (monotonic deltas), not timestamps — survives resume correctly.
+- Emergency save at a step boundary (not inside the signal handler) guarantees a consistent
+  model/optimizer/RNG snapshot. Limitation: a single hung step delays the save until it returns.
+- `load_checkpoint` already raises clearly on missing/corrupt/newer-format checkpoints (never swallows).
+
+**Verified**
+- New tests: atomic save leaves no temp file + carries `wall_clock_s`; missing checkpoint raises
+  `FileNotFoundError`; corrupt checkpoint raises; interrupt handler only flags (no save/raise);
+  emergency checkpoint saved at boundary and loop stops early; N vs (K + resume) reaches the same final
+  step count + tokens with elapsed time persisted.
+- Full suite **92 passed**. `ruff check` + `ruff format --check` clean.
+- Live end-to-end interrupt: launched a real CPU run, sent SIGINT mid-loop → graceful exit (code 0),
+  `emergency.pt` written atomically at step boundary (step 25), `wall_clock_s` recorded, no temp leftovers.

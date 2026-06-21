@@ -2,14 +2,20 @@
 
 Checkpoint payload schema (``format_version`` 1):
     model, optimizer, scheduler, scaler, config, global_step, tokens_seen,
-    rng_state, data_state, best_metric, git_commit, format_version.
+    rng_state, data_state, best_metric, git_commit, wall_clock_s,
+    tokenizer_info, format_version.
+
+Checkpoints are written atomically (temp file -> fsync -> rename) so an interruption
+mid-write can never corrupt the live checkpoint.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import random
 import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +37,9 @@ def save_checkpoint(
     tokens_seen: int = 0,
     best_metric: float | None = None,
     data_state: dict | None = None,
+    wall_clock_s: float = 0.0,
+    tokenizer_info: dict | None = None,
 ) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict() if optimizer else None,
@@ -44,10 +51,37 @@ def save_checkpoint(
         "rng_state": _rng_state(),
         "data_state": data_state or {},
         "best_metric": best_metric,
+        "wall_clock_s": wall_clock_s,
+        "tokenizer_info": tokenizer_info or {},
         "git_commit": git_commit(),
         "format_version": CHECKPOINT_FORMAT_VERSION,
     }
-    torch.save(payload, path)
+    atomic_save(payload, path)
+
+
+def atomic_save(payload, path: str) -> None:
+    """Write ``payload`` to ``path`` atomically: temp file in the same dir, fsync, then rename.
+
+    ``os.replace`` is atomic within a filesystem, so a reader/resume always sees either the old
+    checkpoint or the fully written new one -- never a half-written file from an interrupted save.
+    """
+    path = str(path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_ckpt_", suffix=".pt")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Remove the partial temp file on any failure/interruption (incl. KeyboardInterrupt).
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_checkpoint(

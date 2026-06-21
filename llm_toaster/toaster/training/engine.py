@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import signal
 import time
 from pathlib import Path
 
@@ -44,6 +45,12 @@ class TrainingEngine:
         self.tokens_seen = 0
         self.best_metric = None
         self.current_shard = self.config.training.current_shard
+        # Cumulative training seconds across resumes (elapsed time, not wall-clock timestamps).
+        self.wall_clock_s = float(self.config.training.training_duration)
+        self._run_start = None
+        self._original_signal_handlers = {}
+        self._stop_requested = False
+        self._stop_signum = None
         self.tokenizer = None
         self.model = None
         self.optimizer = None
@@ -156,6 +163,8 @@ class TrainingEngine:
             tokens_seen=self.tokens_seen,
             best_metric=self.best_metric,
             data_state=self.data_state_dict(),
+            wall_clock_s=self._elapsed_seconds_total(),
+            tokenizer_info=self._tokenizer_info(),
         )
         self._save_legacy_config_if_needed()
         if self.config.peft.enabled:
@@ -175,6 +184,7 @@ class TrainingEngine:
         self.global_step = int(checkpoint.get("global_step", self.global_step))
         self.tokens_seen = int(checkpoint.get("tokens_seen", self.tokens_seen))
         self.best_metric = checkpoint.get("best_metric", self.best_metric)
+        self.wall_clock_s = float(checkpoint.get("wall_clock_s", self.wall_clock_s))
         self.load_data_state_dict(checkpoint.get("data_state", {}))
         return checkpoint
 
@@ -198,8 +208,10 @@ class TrainingEngine:
         if "cuda" in str(self.device):
             torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
+        self._run_start = start
         last_log_time, last_log_tokens = start, self.tokens_seen
         log_every = max(1, self.config.logging.log_every_steps)
+        self._install_signal_handlers()
         try:
             while self.global_step < self.config.training.max_iter:
                 loss = self.train_step()
@@ -207,6 +219,7 @@ class TrainingEngine:
                     now = time.perf_counter()
                     interval = now - last_log_time
                     tokens_per_sec = (self.tokens_seen - last_log_tokens) / interval if interval > 0 else 0.0
+                    elapsed_total = self._elapsed_seconds_total()
                     record = {
                         "step": self.global_step,
                         "max_iter": self.config.training.max_iter,
@@ -215,8 +228,8 @@ class TrainingEngine:
                         "grad_norm": self.last_grad_norm,
                         "tokens_per_sec": tokens_per_sec,
                         "tokens_seen": self.tokens_seen,
-                        "elapsed_s": now - start,
-                        "eta_s": self._eta_seconds(now - start),
+                        "elapsed_s": elapsed_total,
+                        "eta_s": self._eta_seconds(elapsed_total),
                         "mfu": compute_mfu(
                             summary["flops_per_token"], tokens_per_sec, self.config.logging.device_peak_flops
                         ),
@@ -227,7 +240,21 @@ class TrainingEngine:
                     last_log_time, last_log_tokens = now, self.tokens_seen
                 metric = self._maybe_evaluate()
                 self._maybe_save(metric)
+                if self._stop_requested:  # interrupt requested -> stop at this clean step boundary
+                    break
+        except KeyboardInterrupt:
+            # Forced interrupt (a second Ctrl-C, or a context where no handler was installed).
+            self._stop_requested = True
+            logger.warning("training interrupted; saving emergency checkpoint")
         finally:
+            if self._stop_requested:
+                try:
+                    self.save_checkpoint(self._emergency_checkpoint_path())
+                except Exception:  # pragma: no cover - emergency save is best effort
+                    logger.exception("emergency checkpoint failed")
+            self.wall_clock_s = self._elapsed_seconds_total()
+            self._run_start = None
+            self._restore_signal_handlers()
             metrics.close()
         return self
 
@@ -239,6 +266,61 @@ class TrainingEngine:
 
     def _peak_mem_bytes(self) -> int:
         return int(torch.cuda.max_memory_allocated()) if "cuda" in str(self.device) else 0
+
+    def _elapsed_seconds_total(self) -> float:
+        """Cumulative training seconds across resumes (perf_counter deltas, never timestamps)."""
+        if self._run_start is None:
+            return self.wall_clock_s
+        return self.wall_clock_s + (time.perf_counter() - self._run_start)
+
+    def _tokenizer_info(self) -> dict:
+        """Special-token ids + vocab size, persisted in the checkpoint for resume validation."""
+        if self.tokenizer is None:
+            return {}
+        return {
+            "eos_token_id": getattr(self.tokenizer, "eos_token_id", None),
+            "bos_token_id": getattr(self.tokenizer, "bos_token_id", None),
+            "pad_token_id": getattr(self.tokenizer, "pad_token_id", None),
+            "vocab_size": getattr(self.tokenizer, "vocab_size", None),
+        }
+
+    def _emergency_checkpoint_path(self) -> str:
+        return str(Path(self.config.checkpointing.output_dir) / "emergency.pt")
+
+    def _install_signal_handlers(self) -> None:
+        """Catch SIGINT/SIGTERM so an interrupted long run saves an emergency checkpoint first.
+
+        signal handlers can only be set from the main thread; in any other context (some test
+        runners, worker threads) this is skipped and training proceeds without the safety net.
+        """
+        self._original_signal_handlers = {}
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                self._original_signal_handlers[sig] = signal.signal(sig, self._handle_interrupt)
+            except (ValueError, OSError, RuntimeError):
+                self._original_signal_handlers.pop(sig, None)
+
+    def _restore_signal_handlers(self) -> None:
+        for sig, handler in self._original_signal_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, RuntimeError):
+                pass
+        self._original_signal_handlers = {}
+
+    def _handle_interrupt(self, signum, _frame):
+        """Request a graceful stop. Runs in async-signal context, so it only sets a flag -- the
+        loop then saves a *consistent* emergency checkpoint at the next step boundary rather than
+        risking a save mid-optimizer-step. Restoring the handlers means a second interrupt hits the
+        default handler and force-quits immediately."""
+        self._stop_requested = True
+        self._stop_signum = signum
+        logger.warning(
+            "received signal %s; saving an emergency checkpoint at the next step boundary "
+            "(interrupt again to force-quit)",
+            signum,
+        )
+        self._restore_signal_handlers()
 
     @property
     def is_finetune_mode(self) -> bool:
@@ -373,6 +455,8 @@ class TrainingEngine:
             tokens_seen=self.tokens_seen,
             best_metric=self.best_metric if metric is None else metric,
             data_state=self.data_state_dict(),
+            wall_clock_s=self._elapsed_seconds_total(),
+            tokenizer_info=self._tokenizer_info(),
         )
         rotate_checkpoints(str(output_dir), save_total_limit=self.config.checkpointing.save_total_limit)
 

@@ -13,6 +13,7 @@ from llm_toaster.toaster.models.registry import build_model
 from llm_toaster.toaster.peft.lora import inject_lora
 from llm_toaster.toaster.training.checkpointing import (
     CHECKPOINT_FORMAT_VERSION,
+    load_checkpoint,
     load_state_dict_any,
     save_checkpoint,
 )
@@ -86,6 +87,33 @@ class CheckpointLoadingTests(unittest.TestCase):
             save_checkpoint(ckpt, build_model(_tiny_config()), config=_tiny_config(), global_step=1)
             raw = torch.load(ckpt, weights_only=False)
             self.assertEqual(raw["format_version"], CHECKPOINT_FORMAT_VERSION)
+
+    def test_atomic_save_leaves_no_temp_file_and_round_trips(self):
+        # Issue #9: atomic write must not leave a ".tmp_ckpt_*" partial behind, and the
+        # resulting checkpoint must load and carry the new wall_clock_s field.
+        with tempfile.TemporaryDirectory() as td:
+            ckpt = os.path.join(td, "latest.pt")
+            save_checkpoint(ckpt, build_model(_tiny_config()), config=_tiny_config(), global_step=2, wall_clock_s=12.5)
+            leftovers = [f for f in os.listdir(td) if f.startswith(".tmp_ckpt_")]
+            self.assertEqual(leftovers, [])
+            raw = torch.load(ckpt, weights_only=False)
+            self.assertEqual(raw["wall_clock_s"], 12.5)
+            self.assertEqual(raw["global_step"], 2)
+
+    def test_missing_checkpoint_raises_clear_error(self):
+        # Issue #9: a missing checkpoint must raise (not silently succeed/return None).
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(FileNotFoundError):
+                load_checkpoint(os.path.join(td, "nope.pt"), build_model(_tiny_config()))
+
+    def test_corrupt_checkpoint_raises_not_swallowed(self):
+        # Issue #9: a truncated/corrupt checkpoint must raise, never load garbage silently.
+        with tempfile.TemporaryDirectory() as td:
+            bad = os.path.join(td, "corrupt.pt")
+            with open(bad, "wb") as handle:
+                handle.write(b"not a real torch checkpoint")
+            with self.assertRaises(Exception):
+                load_checkpoint(bad, build_model(_tiny_config()))
 
     def test_load_state_dict_any_handles_checkpoint_and_bare_state_dict(self):
         config = _tiny_config()

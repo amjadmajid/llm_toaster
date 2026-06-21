@@ -75,6 +75,29 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertTrue(torch.allclose(resumed.model.token_embeddings.weight, reference))
             self.assertEqual(resumed.global_step, trained.global_step)
 
+    def test_resume_continues_to_same_step_count_and_tokens(self):
+        # Issue #6: train N uninterrupted vs. train K -> checkpoint -> resume to N. The resumed run
+        # must CONTINUE (not restart): same final step count and tokens, with elapsed time persisted.
+        with tempfile.TemporaryDirectory() as ref_td, tempfile.TemporaryDirectory() as run_td:
+            ref_cfg = _smoke_cfg(ref_td, "pretrain")
+            ref_cfg.training.max_iter = 2
+            reference = TrainingEngine(ref_cfg).train()
+
+            k_cfg = _smoke_cfg(run_td, "pretrain")
+            k_cfg.training.max_iter = 1
+            interrupted = TrainingEngine(k_cfg).train()
+            self.assertEqual(interrupted.global_step, 1)  # stopped early
+
+            resume_cfg = _smoke_cfg(run_td, "pretrain")
+            resume_cfg.training.max_iter = 2
+            resume_cfg.checkpointing.resume_from_checkpoint = resume_cfg.training.ckpt
+            resumed = TrainingEngine(resume_cfg).train()
+
+            self.assertEqual(resumed.global_step, 2)  # continued 1 -> 2, did not restart
+            self.assertEqual(resumed.global_step, reference.global_step)
+            self.assertEqual(resumed.tokens_seen, reference.tokens_seen)
+            self.assertGreater(resumed.wall_clock_s, 0.0)  # elapsed seconds persisted across resume
+
     def test_resume_restores_data_position(self):
         with tempfile.TemporaryDirectory() as td:
             config = _smoke_cfg(td, "pretrain")

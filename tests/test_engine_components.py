@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -141,6 +142,53 @@ class EngineTrainingTests(unittest.TestCase):
             resumed.load_checkpoint(path)
             self.assertEqual(resumed.global_step, engine.global_step)
             self.assertEqual(resumed.tokens_seen, engine.tokens_seen)
+
+
+class EmergencyCheckpointTests(unittest.TestCase):
+    def test_interrupt_handler_requests_stop_without_saving_or_raising(self):
+        # Issue #9: the signal handler must NOT save/raise in async-signal context -- it only flags
+        # the stop, so the save happens at a clean step boundary (not mid-optimizer-step).
+        with tempfile.TemporaryDirectory() as td:
+            engine, _ = _tiny_engine(td)
+            self.assertFalse(engine._stop_requested)
+            engine._handle_interrupt(signal.SIGINT, None)  # must not raise
+            self.assertTrue(engine._stop_requested)
+            self.assertEqual(engine._stop_signum, signal.SIGINT)
+
+    def test_emergency_checkpoint_saved_at_boundary_then_stops(self):
+        # Requesting a stop after the first step must save a consistent emergency checkpoint and
+        # stop the loop early (well before max_iter).
+        from llm_toaster.toaster.training.engine import TrainingEngine
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = ConfigHandler.from_yaml("config/smoke_test_config.yaml")
+            cfg.training.device = "cpu"
+            cfg.distributed.mixed_precision = "no"
+            cfg.training.max_iter = 1000  # large; we interrupt right after the first step
+            cfg.evaluation.eval_every_steps = 0
+            cfg.logging.log_file = os.path.join(td, "train.log")
+            cfg.logging.metrics_file = os.path.join(td, "metrics.jsonl")
+            cfg.checkpointing.output_dir = td
+            cfg.training.ckpt = os.path.join(td, "base_ckpt")
+            cfg.training.ckpt_config = os.path.join(td, "base_config.yaml")
+
+            engine = TrainingEngine(cfg)
+            original_step = TrainingEngine.train_step
+
+            def step_then_request_stop(self):
+                loss = original_step(self)
+                self._handle_interrupt(signal.SIGINT, None)  # simulate Ctrl-C after the step
+                return loss
+
+            engine.train_step = step_then_request_stop.__get__(engine, TrainingEngine)
+            engine.train()
+
+            self.assertEqual(engine.global_step, 1)  # stopped at the boundary, not max_iter
+            emergency = engine._emergency_checkpoint_path()
+            self.assertTrue(os.path.exists(emergency))
+            checkpoint = load_checkpoint(emergency, engine.model, device="cpu", strict=False)
+            self.assertEqual(checkpoint["global_step"], 1)
+            self.assertIn("wall_clock_s", checkpoint)
 
 
 class LabelShiftLossTests(unittest.TestCase):
