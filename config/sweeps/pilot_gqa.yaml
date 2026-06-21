@@ -1,0 +1,32 @@
+# Pilot study: KV-cache axis (MHA -> GQA -> MQA) at MATCHED parameters (~60M), on the laptop GPU.
+# This is the headline embedded-memory lever: fewer KV heads -> smaller KV-cache, with the solver
+# adjusting n_embd so every run has the same parameter count (so results reflect architecture, not size).
+#
+#   python scripts/sweep.py --spec config/sweeps/pilot_gqa.yaml
+#   python scripts/aggregate.py --dir runs/pilot_gqa --csv runs/pilot_gqa.csv --plot
+#   # then on each device:  python scripts/bench_device.py --config runs/pilot_gqa/<run>/config.yaml \
+#   #                              --checkpoint runs/pilot_gqa/<run>/ckpt --device-name jetson-nx
+#
+# Tune for your GPU: lower batch_size/n_batches if you hit OOM; raise max_iter for cleaner separation.
+# Set logging.device_peak_flops to your GPU's peak FLOP/s to get MFU (e.g. ~3.0e13 for a 4070-class card).
+
+base_config: config/default_config.yaml
+output_dir: runs/pilot_gqa
+seeds: [0, 1]
+target_params: 60_000_000
+vary: n_embd
+
+overrides:
+  # LLaMA-like baseline; only num_key_value_heads varies below.
+  model.position: rope
+  model.norm: rmsnorm
+  model.ffn: swiglu
+  training.seq_len: 512
+  training.batch_size: 16
+  training.n_batches: 4
+  training.max_iter: 3000
+  data.train_on_prompt: false
+  # logging.device_peak_flops: 3.0e13   # uncomment + set to your GPU peak for MFU
+
+axes:
+  model.num_key_value_heads: [8, 4, 2, 1]   # MHA(8) -> GQA(4,2) -> MQA(1)

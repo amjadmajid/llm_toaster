@@ -1,0 +1,13 @@
+# Instant pipeline check (CPU, seconds) — validates the sweep + aggregate harness end to end.
+#   python scripts/sweep.py --spec config/sweeps/smoke.yaml
+#   python scripts/aggregate.py --dir runs/smoke_sweep
+base_config: config/smoke_test_config.yaml
+output_dir: runs/smoke_sweep
+seeds: [0]
+overrides:
+  training.max_iter: 2
+  training.device: cpu
+  distributed.mixed_precision: "no"
+  logging.log_every_steps: 1
+axes:
+  model.num_key_value_heads: [4, 2]   # smoke n_head=4: MHA vs GQA
