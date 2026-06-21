@@ -63,8 +63,22 @@ pytest -q     # if you installed ".[dev]"
 Real pretraining reads tokenized `.npy` shards. Build them once (needs internet + `".[data]"`):
 
 ```bash
-python dataspace/src/download_tokenize_hf.py     # tokenizes fineweb-edu into dataspace/fineweb/*.npy
+python dataspace/src/download_tokenize_hf.py     # tokenizes ALL of fineweb-edu into dataspace/fineweb/*.npy
 ```
+
+The full `sample-10BT` is far too large for Colab or a quick experiment. To pull only a small slice,
+**stream** the dataset and cap the shard count (optionally choosing where they land and how big):
+
+```bash
+# Stream a few shards (no full download). --output-dir / --shard-size override the data-config defaults.
+python dataspace/src/download_tokenize_hf.py --stream --max-shards 4
+python dataspace/src/download_tokenize_hf.py --stream --max-shards 4 \
+  --output-dir /content/drive/MyDrive/llm_toaster_runs/fineweb --shard-size 10_000_000
+```
+
+`--stream` (datasets `streaming=True`) downloads only as much as it writes; `--max-shards N` stops after
+N shards (use N≥2 so one is carved off for validation). Point `--output-dir` at persistent storage so the
+shards survive disconnects, then set `training.data_dir` to that directory.
 
 For offline/airgapped nodes (HPC), do this on a node *with* internet and copy the shards over (see §5).
 Tiny `.txt`/`.tokens` fixtures under `tests/fixtures/tokenized_data/` let you exercise the full
@@ -175,10 +189,16 @@ from google.colab import drive; drive.mount('/content/drive')
 !pip install -e ".[data,viz]" -q
 import torch; print(torch.cuda.get_device_name(0))
 
-# Cell 3 — point all outputs at Drive so they survive disconnects, then train.
+# Cell 3 — smoke check, stream a small data slice to Drive, then train.
 #          On a free T4 use fp16 (no bf16 tensor cores). See the Appendix for the YAML.
 !python trainer.py --config config/smoke_test_config.yaml --mode pretrain    # quick check
-# ... edit a config to set checkpoint/log paths under /content/drive/MyDrive/llm_toaster_runs ...
+
+# Stream a few shards of fineweb-edu straight to Drive (no 10BT download; survives disconnects):
+!python dataspace/src/download_tokenize_hf.py --stream --max-shards 4 \
+  --output-dir /content/drive/MyDrive/llm_toaster_runs/fineweb
+
+# Put my_config.yaml on Drive (copy config/default_config.yaml, apply the Appendix's T4 overrides,
+# and set data_dir to the folder above), then train:
 !python trainer.py --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml --mode pretrain
 
 # Cell 4 — after a disconnect, reconnect, re-run Cells 1–2, then resume:
@@ -186,8 +206,8 @@ import torch; print(torch.cuda.get_device_name(0))
 ```
 
 Tips: **Runtime → Change runtime type → GPU**; set `checkpointing.output_dir`, `training.ckpt`,
-`training.ckpt_config`, and `logging.*` to a Drive path; choose a token budget you can finish in one
-session (`training.max_iter`) and rely on `-ct` to continue across sessions. Free T4 → `fp16`.
+`training.ckpt_config`, `training.data_dir`, and `logging.*` to a Drive path; choose a token budget you
+can finish in one session (`training.max_iter`) and rely on `-ct` to continue across sessions. Free T4 → `fp16`.
 
 ---
 
@@ -403,6 +423,7 @@ and throughput are measured everywhere. See [`docs/running_sweeps.md`](running_s
 | `NaN`/`inf` loss | fp16 instability → switch to `bf16`, or lower `optimizer.lr` / warm up longer. |
 | Tokenizer outputs look byte-level / vocab tiny | tiktoken couldn't fetch GPT-2 assets (offline). Warm `TIKTOKEN_CACHE_DIR` on a node with internet (§5.1). |
 | HF `datasets` fails offline (HPC) | Pre-tokenize on a login node; copy `dataspace/fineweb/*.npy` to the compute filesystem. |
+| Tokenizing fills the disk / runs for hours | Default tokenizes all of `sample-10BT`. Stream a slice: `--stream --max-shards N` (§0.3). |
 | macOS: "op not implemented for MPS" | `export PYTORCH_ENABLE_MPS_FALLBACK=1`; keep `mixed_precision: no` and `compile: false`. |
 | `peak_mem_bytes` / `mfu` / energy are 0 / null | Expected off NVIDIA-CUDA / Jetson; quality + decode tok/s are still valid. |
 | Run died (spot reclaim / SLURM time / Ctrl-C) | An `emergency.pt` was saved; resume with `python trainer.py -ct` (re-sync from S3/Drive/`$WORK` first). |
@@ -422,6 +443,7 @@ training:
   device: cuda
   batch_size: 4
   n_batches: 8
+  data_dir: /content/drive/MyDrive/llm_toaster_runs/fineweb   # shards streamed in §0.3 / Cell 3
   ckpt: /content/drive/MyDrive/llm_toaster_runs/base_ckpt
   ckpt_config: /content/drive/MyDrive/llm_toaster_runs/base_config.yaml
 distributed:
