@@ -1,19 +1,55 @@
 # LLM Toaster
 
-<img style="max-width:400px" src="assets/images/llmtoster.jpg" alt="LLM Toster Logo">
+<img style="max-width:400px" src="assets/images/llmtoster.jpg" alt="LLM Toaster Logo">
 
 ## Overview
-LLM Toster is a library designed for training, fine-tuning, and running inference on Transformer-based language models. It streamlines the process of dataset loading, model configuration, and execution.
+LLM Toaster is a library designed for training, fine-tuning, and running inference on Transformer-based language models. It streamlines the process of dataset loading, model configuration, and execution.
 
 ## Installation
-To install the LLM Toster library, navigate to the root directory and run the following command:
+From the repository root (Python 3.11+; packaging is defined in `pyproject.toml`):
 ```bash
-pip install -e .
+pip install -e .            # core deps: torch, numpy, tiktoken, pyyaml
+pip install -e ".[data]"    # extra: datasets + tqdm (only for the HF download/tokenize script)
+pip install -e ".[dev]"     # extra: pytest, ruff, mypy, pre-commit (development)
 ```
-This will install all necessary packages and dependencies.
 
 ## Configuration
-All configurations can be found in the `llm_toaster/config` directory. Ensure to review and modify these configurations according to your setup and requirements.
+Configs live in `config/`: `config/default_config.yaml` (full size) and
+`config/smoke_test_config.yaml` (tiny, for fast local checks). See
+[Model architecture & options](#model-architecture--options) for the tunable fields.
+
+## Model architecture & options
+
+The model is a **dense, decoder-only Transformer** (GPT-style, pre-norm, tied embeddings by
+default, GPT-2 style weight init so training starts near `ln(vocab)`). Architecture is driven by
+the `model:` / `attention:` config sections, so you can vary **one axis at a time** for comparison.
+
+| Field | Options | Notes |
+|---|---|---|
+| `model.n_blocks` / `model.n_embd` / `model.n_head` | ints | depth / width / heads |
+| `model.position` | `learned` \| `rope` \| `none` | RoPE needs an even head_dim; `none` = no positions |
+| `model.norm` | `layernorm` \| `rmsnorm` | RMSNorm is cheaper |
+| `model.ffn` | `gelu` \| `geglu` \| `swiglu` | `geglu`/`swiglu` are gated (extra projection) |
+| `model.ffn_mult` | int (default 4) | FFN hidden width = `ffn_mult * n_embd` |
+| `model.num_key_value_heads` | int (default = `n_head`) | GQA/MQA — fewer KV heads → smaller KV-cache |
+| `model.tie_embeddings` | bool (default `true`) | share input/output embedding weights |
+
+Reserved but **rejected at config load** (clear `NotImplementedError`): MoE FFN,
+sliding-window attention, `flash_attn_2`/`xformers` backends, SentencePiece tokenizer,
+and non-`none` `distributed.backend`.
+
+## Logging & metrics
+
+Every run logs a startup architecture summary plus an aligned per-step line, and writes a
+machine-readable `logs/metrics.jsonl` (a self-describing `architecture` row + one row per logged
+step) for comparing/plotting runs (`logging.metrics_file: ""` disables it):
+
+```text
+architecture: decoder_transformer (dense) | positions=rope | norm=rmsnorm | ffn=swiglu
+params: 254.1M total | 51.5M embedding | 202.6M non-embedding | ~1016 MB fp32
+attention: n_head=8 kv_heads=2 head_dim=128 (GQA) | KV-cache ~0.13 MB/token, ~128 MB @ seq_len=1024 (fp16)
+step    140/100,000 | loss 7.5664 | lr 6.00e-04 | gnorm 1.23 | 21,098 tok/s | seen 11.4M | 11m51s | eta 2h09m
+```
 
 ## Training
 ### Step 1) data download and tokenization
@@ -49,19 +85,20 @@ To prompt the model, use the following command:
 ```bash
 python inference.py -p="Your prompt here"
 ```
-You can continue interacting with the model by providing new prompts, or type `exit` to quit.
+`inference.py` builds the model via the same registry/tokenizer as training, and `--model` accepts
+either an extracted `.llm` state_dict or a full training checkpoint.
 
 ## Troubleshooting
 If you encounter any issues, please check the following:
 - Ensure all dependencies are installed.
-- Verify the configurations in `config/config.yaml`.
-- Make sure the dataset is downloaded and tokenized correctly.
+- Verify the configuration in `config/default_config.yaml`.
+- Make sure the dataset is downloaded and tokenized correctly (shards in `dataspace/fineweb/`).
 
 ## Contributing
 Contributions are welcome! Please fork the repository and submit a pull request with your improvements or bug fixes.
 
 ## License
-LLM Toster is released under the MIT License. See `LICENSE` for more details.
+LLM Toaster is released under the MIT License. See `LICENSE` for more details.
 
 ## Base training and supervised fine-tuning
 
@@ -135,12 +172,10 @@ LLM Toaster now keeps the original `trainer.py` entrypoint as a compatibility wr
 
 ### Install
 
-```bash
-pip install -e .
-pip install torch numpy pyyaml tiktoken
-```
-
-Optional integrations such as Hugging Face tokenizers, SentencePiece, FlashAttention 2, and xFormers are detected lazily and fail with clear errors if they are unavailable.
+See [Installation](#installation). Hugging Face tokenizers come from the `[hf]` extra. Options the
+engine does not implement are **rejected at config load** with a clear `NotImplementedError` (see
+[Model architecture & options](#model-architecture--options)), so a config never silently claims a
+capability that isn't there.
 
 ### Quick smoke test
 
@@ -184,12 +219,13 @@ Configure attention with:
 attention:
   backend: "sdpa"      # eager | sdpa | sdpa_auto | sdpa_flash | sdpa_mem_efficient | sdpa_math
   sdpa_kernel: "auto"
-  use_gqa: false
-  sliding_window: null
+  sliding_window: null # reserved; a non-null value is rejected at config load
   dropout: 0.0
 ```
 
-The model uses PyTorch scaled-dot-product attention for SDPA-style backends and an educational eager implementation for reference. Optional `flash_attn_2` and `xformers` paths are placeholders that report missing integrations cleanly.
+SDPA-style backends use PyTorch `scaled_dot_product_attention`; `eager` is an educational reference
+implementation. **GQA/MQA is controlled by `model.num_key_value_heads`** (not an attention flag).
+`flash_attn_2` and `xformers` are not wired and are rejected at config load.
 
 ### LoRA finetuning
 
@@ -209,7 +245,7 @@ When enabled, base parameters are frozen, LoRA adapter parameters remain trainab
 
 ### Checkpoint and resume
 
-Checkpoints are managed by `llm_toaster/toaster/training/checkpointing.py` and include model, optimizer, scheduler, scaler, config, global step, tokens seen, RNG state, best metric, data state where available, and the current git commit when available.
+Checkpoints are managed by `llm_toaster/toaster/training/checkpointing.py` and include model, optimizer, scheduler, scaler, config, global step, tokens seen, RNG state, best metric, data state where available, the current git commit when available, and a `format_version`. Resuming with `python trainer.py -ct` restores model + optimizer + scheduler + scaler + RNG state. `load_state_dict_any` also lets tools load weights from a full checkpoint, a legacy `model_state_dict`, or a bare `.llm`.
 
 ```yaml
 checkpointing:
