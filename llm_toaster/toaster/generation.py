@@ -22,10 +22,16 @@ def generate(
     temperature: float = 1.0,
     top_k: int | None = None,
     top_p: float | None = None,
+    use_cache: bool = True,
 ) -> str:
-    """Generate a continuation for ``prompt`` and return the decoded string."""
+    """Generate a continuation for ``prompt`` and return the decoded string.
+
+    Uses the KV-cached decode path by default (faster); set ``use_cache=False`` for the
+    full-forward reference path.
+    """
     input_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
-    output = model.generate_text(
+    decode = model.generate_cached if (use_cache and hasattr(model, "generate_cached")) else model.generate_text
+    output = decode(
         input_ids,
         max_new_tokens,
         temperature=temperature,

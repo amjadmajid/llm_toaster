@@ -90,6 +90,27 @@ class PositionAndFFNTests(unittest.TestCase):
         self.assertLess(_params(build_model(_tiny_config(ffn_mult=2))), _params(build_model(_tiny_config(ffn_mult=8))))
 
 
+class KVCacheTests(unittest.TestCase):
+    def test_cached_matches_uncached_greedy(self):
+        # Greedy (top_k=1) is deterministic, so a correct KV-cache must reproduce the exact tokens.
+        ids = torch.tensor([[5, 6, 7]], dtype=torch.long)
+        for position in ("learned", "rope", "none"):
+            for kv in (None, 2, 1):
+                config = _tiny_config(position=position, num_key_value_heads=kv, n_blocks=2, seq_len=32)
+                config.attention.backend = "eager"
+                model = build_model(config).eval()
+                uncached = model.generate_text(ids, 8, top_k=1)
+                cached = model.generate_cached(ids, 8, top_k=1)
+                self.assertTrue(torch.equal(uncached, cached), msg=f"{position}/kv={kv}")
+
+    def test_generate_cached_runs_on_sdpa_and_stops_at_seq_len(self):
+        config = _tiny_config(position="rope", n_blocks=2, seq_len=8)
+        config.attention.backend = "sdpa"
+        model = build_model(config).eval()
+        out = model.generate_cached(torch.tensor([[1, 2, 3]]), 50, top_k=5, top_p=0.9)
+        self.assertLessEqual(out.shape[1], 8)  # bounded by seq_len, no crash past the context window
+
+
 class LoRATests(unittest.TestCase):
     def test_inject_freezes_base_and_exposes_adapters(self):
         model = build_model(_tiny_config())

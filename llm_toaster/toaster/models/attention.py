@@ -43,37 +43,47 @@ class MultiHeadAttention(nn.Module):
         self.o_proj._is_residual_projection = True  # depth-scaled init (GPT-2 style)
         self.dropout = nn.Dropout(attention_config.dropout or config.dropout_rate)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, layer_cache=None, start_pos: int = 0):
+        """Self-attention. During incremental decode pass ``layer_cache`` (past (k, v)) and
+        ``start_pos`` (absolute position of the first token in ``x``); returns (out, new_cache)."""
         batch, seq_len, channels = x.shape
         q = self._shape_projection(self.q_proj(x), batch, seq_len, self.n_head)
         k = self._shape_projection(self.k_proj(x), batch, seq_len, self.num_key_value_heads)
         v = self._shape_projection(self.v_proj(x), batch, seq_len, self.num_key_value_heads)
         if self.use_rope:
-            q, k = self._apply_rope(q, k, seq_len)
-        k, v = self._repeat_kv_if_needed(k, v)
+            q, k = self._apply_rope(q, k, seq_len, start_pos)
 
+        new_cache = None
+        if layer_cache is not None:
+            past_k, past_v = layer_cache
+            if past_k is not None:
+                k = torch.cat([past_k, k], dim=2)
+                v = torch.cat([past_v, v], dim=2)
+            new_cache = (k, v)  # store pre-repeat (GQA-sized) keys/values
+
+        k, v = self._repeat_kv_if_needed(k, v)
+        cached = layer_cache is not None
         if self.backend == "eager":
-            out = self._eager_attention(q, k, v)
+            out = self._eager_attention(q, k, v, start_pos)
         elif self.backend.startswith("sdpa"):
-            out = self._sdpa_attention(q, k, v)
+            out = self._sdpa_attention(q, k, v, start_pos, cached)
         elif self.backend in {"flash_attn_2", "xformers"}:
             raise ImportError(f"Optional attention backend {self.backend!r} is not installed or wired yet.")
         else:
             raise ValueError(f"Unknown attention backend {self.backend!r}")
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, channels)
-        return self.o_proj(out)
+        return self.o_proj(out), new_cache
 
     def _shape_projection(self, tensor: torch.Tensor, batch: int, seq_len: int, heads: int) -> torch.Tensor:
         return tensor.view(batch, seq_len, heads, self.head_dim).transpose(1, 2)
 
-    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, seq_len: int, start_pos: int = 0):
         """Rotary position embedding (LLaMA/GPT-NeoX 'rotate_half' convention).
 
-        q, k arrive as (batch, heads, seq_len, head_dim). cos/sin are (seq_len, head_dim)
-        and broadcast over batch+heads. Applied before KV repetition so it costs the same
-        regardless of the GQA ratio.
+        q, k arrive as (batch, heads, seq_len, head_dim) for absolute positions
+        ``start_pos .. start_pos+seq_len`` (the offset matters during cached decode).
         """
-        positions = torch.arange(seq_len, device=q.device, dtype=self.rope_inv_freq.dtype)
+        positions = torch.arange(start_pos, start_pos + seq_len, device=q.device, dtype=self.rope_inv_freq.dtype)
         freqs = torch.outer(positions, self.rope_inv_freq)  # (seq_len, head_dim/2)
         emb = torch.cat((freqs, freqs), dim=-1)  # (seq_len, head_dim)
         cos = emb.cos().to(q.dtype)
@@ -88,19 +98,32 @@ class MultiHeadAttention(nn.Module):
         repeats = self.n_head // self.num_key_value_heads
         return k.repeat_interleave(repeats, dim=1), v.repeat_interleave(repeats, dim=1)
 
-    def _eager_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        seq_len = q.size(-2)
+    def _causal_mask(self, q_len: int, k_len: int, start_pos: int, device) -> torch.Tensor:
+        """Boolean (q_len, k_len) mask: query at absolute pos (start_pos+i) attends to keys j<=it."""
+        key_pos = torch.arange(k_len, device=device)
+        query_pos = start_pos + torch.arange(q_len, device=device)
+        return key_pos[None, :] <= query_pos[:, None]
+
+    def _eager_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if self.causal:
-            mask = torch.tril(torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool))
-            scores = scores.masked_fill(~mask.view(1, 1, seq_len, seq_len), float("-inf"))
+            mask = self._causal_mask(q.size(-2), k.size(-2), start_pos, q.device)
+            scores = scores.masked_fill(~mask.view(1, 1, *mask.shape), float("-inf"))
         probs = torch.softmax(scores, dim=-1)
         probs = self.dropout(probs)
         return probs @ v
 
-    def _sdpa_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def _sdpa_attention(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start_pos: int = 0, cached: bool = False
+    ) -> torch.Tensor:
         dropout_p = self.dropout.p if self.training else 0.0
         with _sdpa_kernel_context(self.backend, self.sdpa_kernel):
+            if cached and self.causal:
+                # Non-square q/k during decode: use an explicit absolute-position causal mask.
+                mask = self._causal_mask(q.size(-2), k.size(-2), start_pos, q.device)
+                return F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=mask.view(1, 1, *mask.shape), dropout_p=dropout_p
+                )
             return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=self.causal)
 
 

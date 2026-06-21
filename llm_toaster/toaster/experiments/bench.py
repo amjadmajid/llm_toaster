@@ -4,9 +4,8 @@ Run this *on the target device* (Jetson Nano/NX/AGX or the laptop GPU). Energy i
 Jetson INA rails via ``tegrastats`` or, on a desktop GPU, ``nvidia-smi`` power polling; integrating
 power over the timed generation gives joules and joules/token.
 
-Caveat: this model has no inference KV-cache, so each decoded token re-runs the full forward pass.
-Reported decode tok/s reflects that (it understates a KV-cached deployment) but is consistent across
-architectures, so the *relative* comparison and the KV-cache *size* metric remain meaningful.
+Decode uses the model's KV-cache (``generate_cached``): the prompt is prefilled once and each new
+token reuses cached keys/values, so the reported decode tok/s reflects a realistic deployment.
 """
 
 from __future__ import annotations
@@ -166,18 +165,24 @@ def benchmark_generation(
     sampler=None,
     temperature: float = 1.0,
     top_k: int | None = 50,
+    use_cache: bool = True,
 ) -> dict:
-    """Measure TTFT, decode throughput, peak memory, and energy for one model."""
+    """Measure TTFT, decode throughput, peak memory, and energy for one model.
+
+    ``use_cache`` selects KV-cached decode (the realistic deployment path) vs the full-forward
+    reference; measuring both is a fair comparison and itself a reportable result.
+    """
     sampler = sampler or NullSampler()
     model.eval()
+    decode = model.generate_cached if use_cache else model.generate_text
     ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     prompt_len = ids.shape[1]
 
-    model.generate_text(ids, warmup_tokens, temperature=temperature, top_k=top_k)  # warm caches/JIT
+    decode(ids, warmup_tokens, temperature=temperature, top_k=top_k)  # warm caches/JIT
     _sync(device)
 
     t0 = time.perf_counter()
-    model.generate_text(ids, 1, temperature=temperature, top_k=top_k)
+    decode(ids, 1, temperature=temperature, top_k=top_k)
     _sync(device)
     ttft = time.perf_counter() - t0
 
@@ -185,7 +190,7 @@ def benchmark_generation(
         torch.cuda.reset_peak_memory_stats()
     sampler.start()
     t0 = time.perf_counter()
-    out = model.generate_text(ids, max_new_tokens, temperature=temperature, top_k=top_k)
+    out = decode(ids, max_new_tokens, temperature=temperature, top_k=top_k)
     _sync(device)
     total = time.perf_counter() - t0
     samples = sampler.stop()
@@ -194,6 +199,7 @@ def benchmark_generation(
     energy = integrate_energy(samples)
     return {
         "device": str(device),
+        "use_cache": use_cache,
         "max_new_tokens": max_new_tokens,
         "generated_tokens": generated,
         "ttft_s": ttft,
@@ -227,6 +233,7 @@ def run_bench(args) -> dict:  # pragma: no cover - exercised on real devices
         warmup_tokens=args.warmup,
         sampler=make_sampler(args.energy),
         top_k=args.top_k,
+        use_cache=not args.no_cache,
     )
     result["device_name"] = args.device_name
     result["precision"] = args.precision
@@ -250,6 +257,7 @@ def main() -> None:  # pragma: no cover - CLI on real devices
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--energy", choices=["auto", "tegrastats", "nvidia-smi", "none"], default="auto")
+    parser.add_argument("--no-cache", action="store_true", help="Use the full-forward decode instead of the KV-cache.")
     parser.add_argument("--out", default=None, help="Output JSONL (default results/<device>_<precision>.jsonl).")
     run_bench(parser.parse_args())
 
