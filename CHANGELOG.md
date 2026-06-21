@@ -51,3 +51,24 @@ Target: move `dataspace/` and `tokenizer_lib/` under `llm_toaster/`, convert top
 `model/`, `utils/` into pure re-export shims (keeping `from config import ...` working), then drop the
 generic names from the wheel's discovered packages. This touches many imports/configs and the strict
 editable finder, so it gets its own stage with the same import/compile/pytest checks before/after.
+
+## Stage 2 — config / tokenizer / model smoke confirmation (issues #2, #3, #4)
+
+**What changed (tests only — no source changes; these issues were already resolved)**
+- `tests/test_config_validation.py`: added `DefaultsRoundTripTests` — proves config sections are *not*
+  shared between `ConfigHandler()` instances (the mutable-default bug signature) and that a bare-defaults
+  `to_yaml` → `from_yaml` round trip reproduces `to_dict()` **exactly** (every default survives). [#3]
+- `tests/test_tokenizers.py` (new): `build_tokenizer(ConfigHandler())` encode→decode round-trips a raw
+  prompt, `apply_chat_template` renders + encodes chat text, and the offline `ByteFallbackTokenizer`
+  round-trips + prepends EOS. Runs with the real tiktoken-gpt2 backend when available, byte-fallback
+  otherwise. [#4]
+- `tests/test_legacy_shims.py` (new): the legacy `from model import TransformerModel` positional shim
+  instantiates, runs a forward pass on **random** input (shape ok), `from utils import count_parameters`
+  reports an `"…M"` string, and init is deterministic under a fixed `torch.manual_seed`. Confirms init
+  lives in `models/transformer.py` (`_init_weights`/`_init_parameters`), not a missing `utils.init_weights`. [#2]
+
+**Verified**
+- New tests: 9 passed. Full suite: **84 passed** (was 75). `compileall` clean. Tokenizer round-trip
+  exercised the real tiktoken-gpt2 backend (vocab 50304).
+
+**Outcome:** issues #2, #3, #4 confirmed already-correct and now locked by tests. No production code changed.

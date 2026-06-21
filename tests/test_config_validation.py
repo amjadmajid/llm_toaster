@@ -86,6 +86,31 @@ class BackwardCompatibilityTests(unittest.TestCase):
             self.assertEqual(reloaded.training.mode, config.training.mode)
 
 
+class DefaultsRoundTripTests(unittest.TestCase):
+    """Issue #3 confirmation: sections use field(default_factory=...), so defaults are
+    independent per instance and survive a full YAML round trip."""
+
+    def test_sections_are_not_shared_between_instances(self):
+        # The classic mutable-default bug would make two ConfigHandler() share one
+        # TrainingConfig/list; field(default_factory=...) must give each its own.
+        a, b = ConfigHandler(), ConfigHandler()
+        self.assertIsNot(a.training, b.training)
+        self.assertIsNot(a.peft.target_modules, b.peft.target_modules)
+        a.model.n_embd = 123
+        a.peft.target_modules.append("__mutated__")
+        self.assertNotEqual(b.model.n_embd, 123)
+        self.assertNotIn("__mutated__", b.peft.target_modules)
+
+    def test_bare_defaults_survive_yaml_round_trip(self):
+        config = ConfigHandler()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "defaults.yaml"
+            config.to_yaml(str(path))
+            reloaded = ConfigHandler.from_yaml(str(path))
+        # Every default value must come back unchanged (no dropped/mutated fields).
+        self.assertEqual(reloaded.to_dict(), ConfigHandler().to_dict())
+
+
 class ConfigLoadingErrorTests(unittest.TestCase):
     def _write(self, td, text):
         path = Path(td) / "cfg.yaml"
