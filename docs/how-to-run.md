@@ -197,8 +197,18 @@ import torch; print(torch.cuda.get_device_name(0))
 !python dataspace/src/download_tokenize_hf.py --stream --max-shards 4 \
   --output-dir /content/drive/MyDrive/llm_toaster_runs/fineweb
 
-# Put my_config.yaml on Drive (copy config/default_config.yaml, apply the Appendix's T4 overrides,
-# and set data_dir to the folder above), then train:
+# Build my_config.yaml on Drive once: repo default config + the Appendix's T4/Drive overrides.
+import yaml, pathlib
+RUN = "/content/drive/MyDrive/llm_toaster_runs"
+pathlib.Path(RUN, "fineweb").mkdir(parents=True, exist_ok=True)
+cfg = yaml.safe_load(open("config/default_config.yaml"))
+cfg["training"].update(device="cuda", batch_size=4, n_batches=8,
+                       data_dir=f"{RUN}/fineweb", ckpt=f"{RUN}/base_ckpt", ckpt_config=f"{RUN}/base_config.yaml")
+cfg["distributed"]   = {"mixed_precision": "fp16"}
+cfg["checkpointing"] = {"output_dir": RUN}
+cfg["logging"]       = {"log_file": f"{RUN}/train.log", "metrics_file": f"{RUN}/metrics.jsonl"}
+yaml.safe_dump(cfg, open(f"{RUN}/my_config.yaml", "w"), sort_keys=False)
+
 !python trainer.py --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml --mode pretrain
 
 # Cell 4 — after a disconnect, reconnect, re-run Cells 1–2, then resume:
