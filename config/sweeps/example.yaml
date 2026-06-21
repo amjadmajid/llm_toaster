@@ -1,0 +1,22 @@
+# Example architecture sweep: FFN variants at matched parameters, 3 seeds.
+#   python scripts/sweep.py --spec config/sweeps/example.yaml
+#   python scripts/aggregate.py --dir runs/ffn_ablation --csv runs/ffn_ablation.csv --plot
+#
+# One-variable-at-a-time: every value of every axis is trained with all other settings at the
+# baseline (the base config + overrides). target_params makes the solver adjust `vary` so each
+# run has the same parameter count (so results reflect architecture, not size).
+
+base_config: config/default_config.yaml
+output_dir: runs/ffn_ablation
+seeds: [0, 1, 2]
+target_params: 60_000_000
+vary: n_embd
+
+overrides:
+  training.max_iter: 2000
+  model.position: rope
+  model.norm: rmsnorm
+  model.num_key_value_heads: 2
+
+axes:
+  model.ffn: [gelu, geglu, swiglu]

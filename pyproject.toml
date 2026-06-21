@@ -22,6 +22,8 @@ dependencies = [
 data = ["datasets>=2.0", "tqdm>=4.0"]
 # Hugging Face tokenizer backend (tokenizer.type: hf).
 hf = ["transformers>=4.0"]
+# Pareto plots in scripts/aggregate.py --plot.
+viz = ["matplotlib>=3.5"]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff==0.15.18", "mypy>=1.0", "pre-commit>=3"]
 
 [tool.setuptools.packages.find]

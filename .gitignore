@@ -13,6 +13,7 @@ model/pretrained_models/
 logs/*.logs
 logs/*.txt
 logs/*.jsonl
+runs/
 
 model/babyGPT/*.llm
 .vscode
