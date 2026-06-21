@@ -118,11 +118,16 @@ def _rng_state() -> dict:
 def _restore_rng_state(state: dict) -> None:
     if not state:
         return
+    # RNG states must be CPU ByteTensors. torch.load(map_location="cuda") moves every
+    # tensor in the checkpoint (including these) to the GPU, so move them back explicitly.
     if state.get("torch") is not None:
         torch.set_rng_state(state["torch"].cpu())
     if state.get("python") is not None:
         random.setstate(state["python"])
     if state.get("numpy") is not None:
         np.random.set_state(state["numpy"])
-    if state.get("cuda") is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+    cuda_states = state.get("cuda")
+    if cuda_states is not None and torch.cuda.is_available():
+        cuda_states = [s.cpu() for s in cuda_states]
+        if len(cuda_states) == torch.cuda.device_count():
+            torch.cuda.set_rng_state_all(cuda_states)
