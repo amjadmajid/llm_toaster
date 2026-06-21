@@ -1,6 +1,8 @@
+import argparse
 import logging
 import multiprocessing as mp
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -72,7 +74,15 @@ def write_datafile(filename, tokens_np):
     np.save(filename, tokens_np)
 
 
-def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, shard_size=int(1e8)):
+def download_and_tokenize(
+    dataset_name,
+    remote_name,
+    split_ratio,
+    output_dir,
+    shard_size=int(1e8),
+    stream=False,
+    max_shards=None,
+):
     """
     Download and tokenize the dataset, saving it into shards.
 
@@ -82,16 +92,23 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
     - split_ratio (float): Ratio of data to use for training; remainder is for validation.
     - output_dir (str): Directory to save the tokenized dataset.
     - shard_size (int): Number of tokens per shard.
+    - stream (bool): If True, stream the dataset (datasets streaming=True) instead of downloading it
+      in full first. Combined with max_shards this pulls only as much data as it writes (ideal for
+      Colab / limited disk).
+    - max_shards (int | None): If set, stop after writing this many shards; None processes the whole split.
     """
     create_data_cache_dir(output_dir)
     split = "train"
 
-    logger.info(f"Loading dataset: {dataset_name} with config: {remote_name} and split: {split}")
+    mode = "streaming" if stream else "full download"
+    logger.info(f"Loading dataset: {dataset_name} | config: {remote_name} | split: {split} | mode: {mode}")
+    if max_shards is not None:
+        logger.info(f"Will stop after {max_shards} shard(s) of {shard_size} tokens each.")
     try:
-        dataset = load_dataset(dataset_name, name=remote_name, split=split)
+        dataset = load_dataset(dataset_name, name=remote_name, split=split, streaming=stream)
     except Exception as e:
         logger.error(f"Failed to load dataset: {e}")
-        return
+        return False
 
     nprocs = 1 + os.cpu_count() // 2
     logger.info(f"Number of processors: {nprocs}")
@@ -115,11 +132,15 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
                     write_datafile(Path(output_dir) / f"shard_{shard_index:06d}_{split}.npy", all_tokens_np)
 
                     shard_index += 1
+                    if max_shards is not None and shard_index >= max_shards:
+                        break
                     progress_bar = tqdm(total=shard_size, unit="tokens", desc=f"Shard {shard_index}")
                     token_count = n_tokens - remainder
                     all_tokens_np[:token_count] = tokens[remainder:]
 
-            if token_count != 0:
+            # When we stop early at max_shards, skip the trailing partial shard (it would exceed the
+            # cap); still write it on a natural end-of-stream so no tokens are dropped.
+            if token_count != 0 and (max_shards is None or shard_index < max_shards):
                 write_datafile(Path(output_dir) / f"shard_{shard_index:06d}_{split}.npy", all_tokens_np[:token_count])
 
             progress_bar.close()
@@ -128,9 +149,10 @@ def download_and_tokenize(dataset_name, remote_name, split_ratio, output_dir, sh
     except Exception as e:
         logger.error(f"Error during tokenization: {e}")
         progress_bar.close()
-        return
+        return False
 
     logger.info("Tokenization complete and data saved.")
+    return True
 
 
 def _resolve_output_dir(tokenized_data: str) -> Path:
@@ -148,15 +170,50 @@ def _resolve_output_dir(tokenized_data: str) -> Path:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download and tokenize a HF dataset into .npy token shards.")
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help=(
+            "Stream the dataset (datasets streaming=True) instead of downloading it in full. "
+            "Combine with --max-shards to pull only a small slice (ideal for Colab / limited disk)."
+        ),
+    )
+    parser.add_argument(
+        "--max-shards",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Stop after writing N shards (shard_size tokens each); default processes the whole split. "
+            "Use N>=2 so a train shard remains after the validation split is carved off."
+        ),
+    )
+    args = parser.parse_args()
+    if args.max_shards is not None and args.max_shards < 1:
+        parser.error("--max-shards must be >= 1")
+
     data_config = DataConfig()
 
-    download_and_tokenize(
+    ok = download_and_tokenize(
         dataset_name=data_config.dataset_name,
         remote_name=data_config.remote_name,
         split_ratio=data_config.split_ratio,
         output_dir=str(_resolve_output_dir(data_config.tokenized_data)),
         shard_size=data_config.shard_size,
+        stream=args.stream,
+        max_shards=args.max_shards,
     )
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if args.stream:
+        # HF Hub's streaming clients (Xet/httpx) keep background threads alive. Once the shards are
+        # safely on disk, those threads can abort during normal interpreter shutdown
+        # (PyGILState_Release / "Bad file descriptor"). Exit promptly, skipping finalizers, so a
+        # successful streaming run doesn't end in a noisy core dump.
+        os._exit(0 if ok else 1)
+    sys.exit(0 if ok else 1)
 
     # # change the number of shards for validation set if desire without downloading
     # val_shards(data_config.tokenized_data, .95)
