@@ -189,18 +189,43 @@ if __name__ == "__main__":
             "Use N>=2 so a train shard remains after the validation split is carved off."
         ),
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Where to write shards (default: the data config's tokenized_data). Absolute paths are used "
+            "as-is; relative paths resolve against the repo root. Point at Drive/persistent storage on Colab."
+        ),
+    )
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Tokens per shard (default: the data config's shard_size). Underscores allowed, e.g. "
+            "10_000_000. Keep it comfortably above batch_size*seq_len."
+        ),
+    )
     args = parser.parse_args()
     if args.max_shards is not None and args.max_shards < 1:
         parser.error("--max-shards must be >= 1")
+    if args.shard_size is not None and args.shard_size < 1:
+        parser.error("--shard-size must be >= 1")
 
     data_config = DataConfig()
+    requested_out = args.output_dir if args.output_dir is not None else data_config.tokenized_data
+    output_dir = str(_resolve_output_dir(requested_out))
+    shard_size = args.shard_size if args.shard_size is not None else data_config.shard_size
 
     ok = download_and_tokenize(
         dataset_name=data_config.dataset_name,
         remote_name=data_config.remote_name,
         split_ratio=data_config.split_ratio,
-        output_dir=str(_resolve_output_dir(data_config.tokenized_data)),
-        shard_size=data_config.shard_size,
+        output_dir=output_dir,
+        shard_size=shard_size,
         stream=args.stream,
         max_shards=args.max_shards,
     )
