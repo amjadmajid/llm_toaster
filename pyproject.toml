@@ -27,8 +27,12 @@ viz = ["matplotlib>=3.5"]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff==0.15.18", "mypy>=1.0", "pre-commit>=3"]
 
 [tool.setuptools.packages.find]
-# Mirrors the previous find_packages() set, minus tests.
+# Editable installs (PEP 660) expose exactly the packages discovered here. The engine imports
+# `from dataspace import DataLoaderLite` and the offline pipeline uses `from config / tokenizer_lib`,
+# so the generic-named legacy packages MUST stay discoverable (see CHANGELOG "Package layout").
+# `exclude` is defensive: never ship tests or run artifacts in a built wheel.
 include = ["llm_toaster*", "config*", "dataspace*", "model*", "tokenizer_lib*", "utils*"]
+exclude = ["tests*", "runs*", "checkpoints*", "logs*", "docs*", "assets*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
