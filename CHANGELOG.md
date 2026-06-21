@@ -149,3 +149,28 @@ two-token-ahead bug exists.
   rectangular (`step,…,val_loss,val_perplexity,iter_time_ms,…,peak_mem_reserved_bytes,resumed`).
 - Full suite **93 passed**; `ruff check` + `ruff format --check` clean. Note: `elapsed_s` is the elapsed
   time field (kept its name; aggregate.py is unaffected — it reads `peak_mem_bytes`, still present).
+
+## Stage 6 — minimal tests + final smoke run (issue #10)
+
+**Audit: the minimal-test checklist is fully covered (no new duplicate tests needed)**
+- config round-trip → `tests/test_config_validation.py::DefaultsRoundTripTests`
+- tokenizer encode/decode → `tests/test_tokenizers.py::TokenizerRoundTripTests`
+- dataloader label-shift → `tests/test_data_loader.py::LabelShiftContractTests`
+- model forward shape → `tests/test_models_and_lora.py::ModelMatrixTests` (+ `test_engine_components`)
+- one-batch training loss → `tests/test_engine_components.py` (`test_train_step_advances_and_is_finite`,
+  `LabelShiftLossTests`)
+- checkpoint save/load/resume smoke → `tests/test_training_smoke.py` (resume tests),
+  `tests/test_engine_components.py::EngineTrainingTests::test_checkpoint_resume_restores_progress`
+
+**Final verification (the CI gate + the requested smoke)**
+- `ruff check .` clean; `ruff format --check .` clean (after a pre-existing `experiments/sweep.py`
+  reformat, committed separately — a file untouched by these stages).
+- `python -m compileall .` clean.
+- `pytest --cov --cov-report=term-missing` → **all tests pass, total coverage 86.48% (gate 80%)**.
+- **Live end-to-end CPU run via the scripts** (in a temp dir, repo left clean): `python trainer.py
+  --config <smoke> --mode pretrain` produced `ckpt`, `metrics.jsonl`, `metrics.csv`, the resolved-config
+  snapshot, and `train.log` (with `val_loss` surfaced); `python inference.py --config <smoke> --model
+  <ckpt> -p "hello world"` loaded that checkpoint and generated text. Both scripts exited 0.
+
+**Outcome:** all ten reported issues are resolved or confirmed-already-correct, each locked by a test.
+`git status` clean; the suite, lint, compile, and an end-to-end CPU train→infer run all pass.
