@@ -114,6 +114,7 @@ class LoggingConfig:
     log_file: str = "logs/log.txt"
     log_every_steps: int = 20
     metrics_file: str = "logs/metrics.jsonl"  # machine-readable per-step metrics; "" disables
+    device_peak_flops: Optional[float] = None  # device peak FLOP/s for MFU; None disables MFU
 
 
 @dataclass

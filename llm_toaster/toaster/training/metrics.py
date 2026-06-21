@@ -39,8 +39,8 @@ def human_bytes(n: float) -> str:
 
 
 def format_metrics_line(record: dict) -> str:
-    """Aligned per-step console line."""
-    return (
+    """Aligned per-step console line. MFU and peak memory are appended when available."""
+    line = (
         f"step {record['step']:>7,}/{record['max_iter']:,} | "
         f"loss {record['loss']:.4f} | "
         f"lr {record['lr']:.2e} | "
@@ -50,6 +50,11 @@ def format_metrics_line(record: dict) -> str:
         f"{format_duration(record['elapsed_s'])} | "
         f"eta {format_duration(record['eta_s'])}"
     )
+    if record.get("mfu") is not None:
+        line += f" | mfu {record['mfu'] * 100:.1f}%"
+    if record.get("peak_mem_bytes"):
+        line += f" | mem {human_bytes(record['peak_mem_bytes'])}"
+    return line
 
 
 def architecture_summary(model, config) -> dict:
@@ -62,6 +67,10 @@ def architecture_summary(model, config) -> dict:
     # KV cache (autoregressive inference), fp16: 2 tensors (k, v) per layer.
     kv_bytes_per_token = 2 * config.model.n_blocks * kv_heads * head_dim * 2
     attention_kind = "MHA" if kv_heads == n_head else ("MQA" if kv_heads == 1 else "GQA")
+    # Training FLOPs/token (fwd+bwd), standard 6N + attention term (Kaplan/nanoGPT convention).
+    # N excludes learned position embeddings (no matmul) but keeps the tied token embedding (lm_head matmul).
+    pos_emb = config.model.seq_len * config.model.n_embd if config.model.position == "learned" else 0
+    flops_per_token = 6 * (total - pos_emb) + 12 * config.model.n_blocks * n_head * head_dim * config.model.seq_len
     return {
         "architecture": config.model.architecture,
         "dense": config.model.ffn != "moe",
@@ -78,7 +87,15 @@ def architecture_summary(model, config) -> dict:
         "kv_bytes_per_token": kv_bytes_per_token,
         "kv_bytes_at_seq_len": kv_bytes_per_token * config.model.seq_len,
         "seq_len": config.model.seq_len,
+        "flops_per_token": flops_per_token,
     }
+
+
+def compute_mfu(flops_per_token: float, tokens_per_sec: float, device_peak_flops: float | None) -> float | None:
+    """Model FLOPs Utilization = achieved FLOP/s / device peak FLOP/s. Needs the device peak."""
+    if not device_peak_flops:
+        return None
+    return (flops_per_token * tokens_per_sec) / device_peak_flops
 
 
 def format_architecture_summary(summary: dict) -> list[str]:
@@ -95,6 +112,7 @@ def format_architecture_summary(summary: dict) -> list[str]:
         f"head_dim={summary['head_dim']} ({summary['attention_kind']}) | "
         f"KV-cache {human_bytes(summary['kv_bytes_per_token'])}/token, "
         f"{human_bytes(summary['kv_bytes_at_seq_len'])} @ seq_len={summary['seq_len']} (fp16)",
+        f"compute: ~{summary['flops_per_token'] / 1e9:.2f} GFLOP/token (train fwd+bwd)",
     ]
 
 

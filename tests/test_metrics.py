@@ -7,6 +7,7 @@ import unittest
 
 from llm_toaster.toaster.training.metrics import (
     JsonlMetricsWriter,
+    compute_mfu,
     format_duration,
     format_metrics_line,
     human_bytes,
@@ -41,6 +42,32 @@ class FormattingTests(unittest.TestCase):
         )
         for token in ("step", "loss 7.5664", "tok/s", "eta"):
             self.assertIn(token, line)
+
+
+class MfuTests(unittest.TestCase):
+    def test_compute_mfu_needs_device_peak(self):
+        self.assertIsNone(compute_mfu(1e9, 1000, None))
+        self.assertIsNone(compute_mfu(1e9, 1000, 0))
+        # achieved = flops_per_token * tok/s = 1e12; peak 2e12 -> 50%
+        self.assertAlmostEqual(compute_mfu(1e9, 1000, 2e12), 0.5)
+
+    def test_metrics_line_appends_mfu_and_mem_when_present(self):
+        base = {
+            "step": 1,
+            "max_iter": 10,
+            "loss": 1.0,
+            "lr": 1e-4,
+            "grad_norm": 1.0,
+            "tokens_per_sec": 100,
+            "tokens_seen": 100,
+            "elapsed_s": 1,
+            "eta_s": 1,
+        }
+        self.assertNotIn("mfu", format_metrics_line(base))
+        rich = {**base, "mfu": 0.42, "peak_mem_bytes": 8 * 1024**3}
+        line = format_metrics_line(rich)
+        self.assertIn("mfu 42.0%", line)
+        self.assertIn("mem 8.0 GB", line)
 
 
 class JsonlWriterTests(unittest.TestCase):

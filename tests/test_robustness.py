@@ -60,6 +60,7 @@ class ArchitectureSummaryTests(unittest.TestCase):
         summary = architecture_summary(build_model(config), config)
         self.assertEqual(summary["params_total"], summary["params_embedding"] + summary["params_non_embedding"])
         self.assertGreater(summary["kv_bytes_per_token"], 0)
+        self.assertGreater(summary["flops_per_token"], 0)
         self.assertEqual(summary["attention_kind"], "MHA")
 
     def test_gqa_shrinks_kv_cache(self):

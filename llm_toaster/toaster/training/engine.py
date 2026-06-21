@@ -25,6 +25,7 @@ from .checkpointing import save_checkpoint as save_training_checkpoint
 from .metrics import (
     JsonlMetricsWriter,
     architecture_summary,
+    compute_mfu,
     format_architecture_summary,
     format_metrics_line,
 )
@@ -194,6 +195,8 @@ class TrainingEngine:
             logger.info(line)
         metrics.write({"type": "architecture", **summary})
 
+        if "cuda" in str(self.device):
+            torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         last_log_time, last_log_tokens = start, self.tokens_seen
         log_every = max(1, self.config.logging.log_every_steps)
@@ -203,16 +206,21 @@ class TrainingEngine:
                 if self.global_step % log_every == 0:
                     now = time.perf_counter()
                     interval = now - last_log_time
+                    tokens_per_sec = (self.tokens_seen - last_log_tokens) / interval if interval > 0 else 0.0
                     record = {
                         "step": self.global_step,
                         "max_iter": self.config.training.max_iter,
                         "loss": loss,
                         "lr": self.scheduler.get_last_lr()[0],
                         "grad_norm": self.last_grad_norm,
-                        "tokens_per_sec": (self.tokens_seen - last_log_tokens) / interval if interval > 0 else 0.0,
+                        "tokens_per_sec": tokens_per_sec,
                         "tokens_seen": self.tokens_seen,
                         "elapsed_s": now - start,
                         "eta_s": self._eta_seconds(now - start),
+                        "mfu": compute_mfu(
+                            summary["flops_per_token"], tokens_per_sec, self.config.logging.device_peak_flops
+                        ),
+                        "peak_mem_bytes": self._peak_mem_bytes(),
                     }
                     logger.info(format_metrics_line(record))
                     metrics.write({"type": "step", **record})
@@ -228,6 +236,9 @@ class TrainingEngine:
             return 0.0
         remaining = max(0, self.config.training.max_iter - self.global_step)
         return remaining * (elapsed / self.global_step)
+
+    def _peak_mem_bytes(self) -> int:
+        return int(torch.cuda.max_memory_allocated()) if "cuda" in str(self.device) else 0
 
     @property
     def is_finetune_mode(self) -> bool:
