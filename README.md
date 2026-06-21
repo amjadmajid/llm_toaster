@@ -45,11 +45,16 @@ machine-readable `logs/metrics.jsonl` (a self-describing `architecture` row + on
 step) for comparing/plotting runs (`logging.metrics_file: ""` disables it):
 
 ```text
-architecture: decoder_transformer (dense) | positions=rope | norm=rmsnorm | ffn=swiglu
-params: 254.1M total | 51.5M embedding | 202.6M non-embedding | ~1016 MB fp32
-attention: n_head=8 kv_heads=2 head_dim=128 (GQA) | KV-cache ~0.13 MB/token, ~128 MB @ seq_len=1024 (fp16)
+architecture: decoder_transformer (dense) | positions=learned | norm=layernorm | ffn=gelu
+params: 254.1M total | 52.6M embedding | 201.5M non-embedding | ~969.3 MB fp32
+attention: n_head=8 kv_heads=8 head_dim=128 (MHA) | KV-cache 64.0 KB/token, 64.0 MB @ seq_len=1024 (fp16)
+compute: ~1.72 GFLOP/token (train fwd+bwd)
 step    140/100,000 | loss 7.5664 | lr 6.00e-04 | gnorm 1.23 | 21,098 tok/s | seen 11.4M | 11m51s | eta 2h09m
 ```
+
+Run `python scripts/describe_arch.py --config <cfg>` for a full **architecture card** (Mermaid
+dataflow + decoder-block diagrams and a per-component parameter table with exact numbers). See
+[`docs/architecture.md`](docs/architecture.md) for the design overview and per-variant diagrams.
 
 ## Training
 ### Step 1) data download and tokenization
