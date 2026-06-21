@@ -143,6 +143,42 @@ class EngineTrainingTests(unittest.TestCase):
             self.assertEqual(resumed.tokens_seen, engine.tokens_seen)
 
 
+class LabelShiftLossTests(unittest.TestCase):
+    """Issue #5: the single-shift contract end to end.
+
+    The dataloader returns already-shifted (x, y); ``train_step`` compares logits to y
+    directly with NO second shift (no ``logits[:, :-1]`` / ``y[:, 1:]``). This runs the real
+    DataLoaderLite -> model -> loss path and confirms a finite loss with aligned lengths.
+    """
+
+    def test_loss_computes_on_dataloader_batch_without_double_shift(self):
+        from dataspace.src.data_loader import DataLoaderLite
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "train_000.txt"), "w", encoding="utf-8") as handle:
+                handle.write(" ".join(str(i % 50) for i in range(256)))
+            loader = DataLoaderLite(B=2, T=8, split="train", data_root=td)
+            x, y, _ = loader.next_batch()
+
+            cfg = ConfigHandler.from_yaml("config/smoke_test_config.yaml")
+            cfg.model.vocab_size = 64
+            cfg.model.n_embd = 16
+            cfg.model.n_head = 4
+            cfg.model.n_blocks = 1
+            cfg.model.seq_len = 8
+            model = build_model(cfg)
+
+            logits = model(torch.as_tensor(x, dtype=torch.long))
+            # Exactly mirrors engine.train_step: loss on (logits, y) with no re-slicing.
+            loss = torch.nn.CrossEntropyLoss(ignore_index=-100)(
+                logits.view(-1, logits.size(-1)), torch.as_tensor(y, dtype=torch.long).view(-1)
+            )
+            self.assertTrue(torch.isfinite(loss))
+            self.assertGreater(float(loss.detach()), 0.0)
+            # logits and targets align position-for-position (same T) -> no off-by-one.
+            self.assertEqual(logits.shape[1], y.shape[1])
+
+
 class GenerationTests(unittest.TestCase):
     def test_generate_text_supports_top_k_and_top_p(self):
         cfg = ConfigHandler.from_yaml("config/smoke_test_config.yaml")

@@ -72,3 +72,20 @@ editable finder, so it gets its own stage with the same import/compile/pytest ch
   exercised the real tiktoken-gpt2 backend (vocab 50304).
 
 **Outcome:** issues #2, #3, #4 confirmed already-correct and now locked by tests. No production code changed.
+
+## Stage 3 — training loss / label-shift correctness (issue #5)
+
+**What changed (tests only — labels are already shifted exactly once)**
+- `tests/test_data_loader.py`: added `LabelShiftContractTests` — for tokens `[10, 11, 12, 13]` the
+  loader yields `x=[[10,11,12]]`, `y=[[11,12,13]]`, i.e. pairs `10->11, 11->12, 12->13`, and the
+  single-shift invariant `y[:-1] == x[1:]`. Torch-free.
+- `tests/test_engine_components.py`: added `LabelShiftLossTests` — runs the real
+  `DataLoaderLite -> build_model -> CrossEntropyLoss` path and confirms a finite, positive loss with
+  logits/targets aligned position-for-position. This mirrors `engine.train_step` exactly: the loss is
+  computed on `(logits, y)` with **no** second shift (`logits[:, :-1]` / `y[:, 1:]` does not exist).
+
+**Decision (documented):** label shifting happens in exactly ONE place — the dataloader
+(`data_loader.py`: `x=buf[:-1]`, `y=buf[1:]`). The trainer compares logits to targets directly. No
+two-token-ahead bug exists.
+
+**Verified:** new tests pass; full suite **86 passed**; `compileall` clean.

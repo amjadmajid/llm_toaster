@@ -49,5 +49,28 @@ class DataLoaderLiteTests(unittest.TestCase):
             self.assertTrue((got_x == expected_x).all())  # resumes the exact same data
 
 
+class LabelShiftContractTests(unittest.TestCase):
+    """Issue #5: labels are shifted exactly once, in the dataloader.
+
+    For tokens [10, 11, 12, 13] the loader must yield input/target pairs
+    10->11, 11->12, 12->13 (next-token prediction), i.e. y is x shifted left by one.
+    The trainer then compares logits to y directly (no second shift) -- see
+    test_engine_components.LabelShiftLossTests.
+    """
+
+    def test_inputs_and_targets_are_shifted_by_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_shard(td, "train_000.txt", [10, 11, 12, 13])
+            loader = DataLoaderLite(B=1, T=3, split="train", data_root=td)
+            x, y, _ = loader.next_batch()
+
+            self.assertEqual(x.tolist(), [[10, 11, 12]])  # inputs
+            self.assertEqual(y.tolist(), [[11, 12, 13]])  # targets = next token
+            # Each input predicts exactly the next token: 10->11, 11->12, 12->13.
+            self.assertEqual(list(zip(x[0].tolist(), y[0].tolist())), [(10, 11), (11, 12), (12, 13)])
+            # Single-shift invariant: the target at position i is the input at position i+1.
+            self.assertEqual(y[0][:-1].tolist(), x[0][1:].tolist())
+
+
 if __name__ == "__main__":
     unittest.main()
