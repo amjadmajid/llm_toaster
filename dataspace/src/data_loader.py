@@ -123,6 +123,22 @@ class DataLoaderLite:
         self.current_position = self.B * self.T * self.process_rank
         logger.info(f"Advanced to shard {self.current_shard}")
 
+    def state_dict(self):
+        """Persist the read cursor (shard + offset) so training can resume mid-dataset."""
+        return {"current_shard": self.current_shard, "current_position": self.current_position}
+
+    def load_state_dict(self, state):
+        """Restore the cursor saved by ``state_dict`` (reloads that shard).
+
+        Without this, ``trainer.py -ct`` would resume model/optimizer/step but restart the data
+        from shard 0, position 0.
+        """
+        if not state:
+            return
+        self.current_shard = int(state.get("current_shard", self.current_shard)) % len(self.shards)
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = int(state.get("current_position", self.current_position))
+
     def shuffle_shards(self):
         """Shuffle the order of shards."""
         np.random.shuffle(self.shards)

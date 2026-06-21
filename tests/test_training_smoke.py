@@ -75,6 +75,22 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertTrue(torch.allclose(resumed.model.token_embeddings.weight, reference))
             self.assertEqual(resumed.global_step, trained.global_step)
 
+    def test_resume_restores_data_position(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = _smoke_cfg(td, "pretrain")
+            trained = TrainingEngine(config).train()
+
+            resumed = TrainingEngine(_smoke_cfg(td, "pretrain"))
+            resumed.setup_tokenizer()
+            resumed.setup_model()
+            resumed.setup_dataloaders()  # fresh loader starts at shard 0
+            resumed.setup_optimizer()
+            resumed.setup_scheduler()
+            resumed.setup_scaler()
+            resumed.load_checkpoint(config.training.ckpt)  # must re-seek the data cursor
+            self.assertEqual(resumed.train_loader.current_shard, trained.train_loader.current_shard)
+            self.assertEqual(resumed.train_loader.current_position, trained.train_loader.current_position)
+
 
 if __name__ == "__main__":
     unittest.main()

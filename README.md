@@ -54,7 +54,9 @@ step    140/100,000 | loss 7.5664 | lr 6.00e-04 | gnorm 1.23 | 21,098 tok/s | se
 
 Run `python scripts/describe_arch.py --config <cfg>` for a full **architecture card** (Mermaid
 dataflow + decoder-block diagrams and a per-component parameter table with exact numbers). See
-[`docs/architecture.md`](docs/architecture.md) for the design overview and per-variant diagrams.
+[`docs/architecture.md`](docs/architecture.md) for the design overview and per-variant diagrams, and
+[`docs/running_sweeps.md`](docs/running_sweeps.md) to run a controlled architecture sweep
+(matched-parameter training → Pareto table → on-device measurement).
 
 ## Training
 ### Step 1) data download and tokenization
