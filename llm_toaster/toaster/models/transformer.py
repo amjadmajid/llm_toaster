@@ -18,7 +18,9 @@ class TransformerBlock(nn.Module):
         self.norm1 = build_norm(model_config.norm, model_config.n_embd)
         self.attention = MultiHeadAttention(model_config, attention_config, causal=True)
         self.norm2 = build_norm(model_config.norm, model_config.n_embd)
-        self.feed_forward = build_ffn(model_config.ffn, model_config.n_embd, model_config.dropout_rate)
+        self.feed_forward = build_ffn(
+            model_config.ffn, model_config.n_embd, model_config.dropout_rate, model_config.ffn_mult
+        )
         self.dropout = nn.Dropout(model_config.dropout_rate)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -32,12 +34,15 @@ class TransformerModel(nn.Module):
 
     def __init__(self, model_config, attention_config):
         super().__init__()
-        if model_config.position == "rope":
-            raise NotImplementedError("RoPE is reserved in config but not implemented yet.")
         vocab_size = model_config.vocab_size or 50304
         self.seq_len = model_config.seq_len
+        self.position = model_config.position
         self.token_embeddings = nn.Embedding(vocab_size, model_config.n_embd)
-        self.position_embeddings = nn.Embedding(model_config.seq_len, model_config.n_embd)
+        # Learned absolute positions add an embedding table; RoPE injects positions inside
+        # attention; "none" uses no positional signal at all.
+        self.position_embeddings = (
+            nn.Embedding(model_config.seq_len, model_config.n_embd) if model_config.position == "learned" else None
+        )
         self.TransformerBlocks = nn.ModuleList(
             TransformerBlock(model_config, attention_config) for _ in range(model_config.n_blocks)
         )
@@ -62,8 +67,10 @@ class TransformerModel(nn.Module):
         _batch, seq_len = input_indices.shape
         if seq_len > self.seq_len:
             raise ValueError(f"Input sequence length {seq_len} exceeds configured seq_len {self.seq_len}")
-        positions = torch.arange(seq_len, device=input_indices.device)
-        x = self.token_embeddings(input_indices) + self.position_embeddings(positions)
+        x = self.token_embeddings(input_indices)
+        if self.position_embeddings is not None:
+            positions = torch.arange(seq_len, device=input_indices.device)
+            x = x + self.position_embeddings(positions)
         for block in self.TransformerBlocks:
             x = block(x)
         return self.lm_head(self.norm(x))

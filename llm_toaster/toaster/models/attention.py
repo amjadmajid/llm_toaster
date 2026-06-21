@@ -26,6 +26,15 @@ class MultiHeadAttention(nn.Module):
         self.sdpa_kernel = attention_config.sdpa_kernel
         self.causal = causal
 
+        # RoPE rotates query/key pairs by position-dependent angles instead of adding
+        # learned position embeddings. It needs an even head_dim (dims are rotated in pairs).
+        self.use_rope = getattr(config, "position", "learned") == "rope"
+        if self.use_rope:
+            if self.head_dim % 2 != 0:
+                raise ValueError("RoPE requires an even head_dim (n_embd / n_head must be even)")
+            inv_freq = 1.0 / (10000.0 ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim))
+            self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
+
         kv_width = self.num_key_value_heads * self.head_dim
         self.q_proj = nn.Linear(config.n_embd, config.n_embd)
         self.k_proj = nn.Linear(config.n_embd, kv_width)
@@ -39,6 +48,8 @@ class MultiHeadAttention(nn.Module):
         q = self._shape_projection(self.q_proj(x), batch, seq_len, self.n_head)
         k = self._shape_projection(self.k_proj(x), batch, seq_len, self.num_key_value_heads)
         v = self._shape_projection(self.v_proj(x), batch, seq_len, self.num_key_value_heads)
+        if self.use_rope:
+            q, k = self._apply_rope(q, k, seq_len)
         k, v = self._repeat_kv_if_needed(k, v)
 
         if self.backend == "eager":
@@ -54,6 +65,22 @@ class MultiHeadAttention(nn.Module):
 
     def _shape_projection(self, tensor: torch.Tensor, batch: int, seq_len: int, heads: int) -> torch.Tensor:
         return tensor.view(batch, seq_len, heads, self.head_dim).transpose(1, 2)
+
+    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rotary position embedding (LLaMA/GPT-NeoX 'rotate_half' convention).
+
+        q, k arrive as (batch, heads, seq_len, head_dim). cos/sin are (seq_len, head_dim)
+        and broadcast over batch+heads. Applied before KV repetition so it costs the same
+        regardless of the GQA ratio.
+        """
+        positions = torch.arange(seq_len, device=q.device, dtype=self.rope_inv_freq.dtype)
+        freqs = torch.outer(positions, self.rope_inv_freq)  # (seq_len, head_dim/2)
+        emb = torch.cat((freqs, freqs), dim=-1)  # (seq_len, head_dim)
+        cos = emb.cos().to(q.dtype)
+        sin = emb.sin().to(q.dtype)
+        q_rot = (q * cos) + (_rotate_half(q) * sin)
+        k_rot = (k * cos) + (_rotate_half(k) * sin)
+        return q_rot, k_rot
 
     def _repeat_kv_if_needed(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.num_key_value_heads == self.n_head:
@@ -75,6 +102,13 @@ class MultiHeadAttention(nn.Module):
         dropout_p = self.dropout.p if self.training else 0.0
         with _sdpa_kernel_context(self.backend, self.sdpa_kernel):
             return F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=self.causal)
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the last dim by splitting it in half: [a, b] -> [-b, a]."""
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 @contextlib.contextmanager

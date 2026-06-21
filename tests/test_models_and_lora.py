@@ -7,8 +7,13 @@ import unittest
 import torch
 
 from llm_toaster.toaster.config import ConfigHandler
+from llm_toaster.toaster.models.feedforward import GEGLUFFN, GELUFFN, SwiGLUFFN
 from llm_toaster.toaster.models.registry import build_model
 from llm_toaster.toaster.peft.lora import LoRALinear, inject_lora, lora_state_dict, merge_lora
+
+
+def _params(model):
+    return sum(p.numel() for p in model.parameters())
 
 
 def _tiny_config(**overrides):
@@ -39,11 +44,9 @@ class ModelMatrixTests(unittest.TestCase):
         out = build_model(config)(torch.ones(2, 8, dtype=torch.long))
         self.assertEqual(out.shape, (2, 8, 64))
 
-    def test_unimplemented_features_raise(self):
+    def test_moe_is_not_implemented(self):
         with self.assertRaises(NotImplementedError):
             build_model(_tiny_config(ffn="moe"))
-        with self.assertRaises(NotImplementedError):
-            build_model(_tiny_config(position="rope"))
 
     def test_gpt_style_init_uses_small_std(self):
         # Default PyTorch init gives embeddings std ~1.0; GPT-style init must be ~0.02.
@@ -53,6 +56,38 @@ class ModelMatrixTests(unittest.TestCase):
         # Residual output projections are scaled down further (0.02 / sqrt(2*n_blocks)).
         o_proj = model.TransformerBlocks[0].attention.o_proj
         self.assertLess(float(o_proj.weight.detach().std()), 0.02)
+
+
+class PositionAndFFNTests(unittest.TestCase):
+    def test_rope_and_none_skip_position_table(self):
+        x = torch.ones(2, 8, dtype=torch.long)
+        for position in ("rope", "none"):
+            model = build_model(_tiny_config(position=position))
+            self.assertIsNone(model.position_embeddings, msg=position)
+            self.assertEqual(model(x).shape, (2, 8, 64), msg=position)
+        self.assertIsNotNone(build_model(_tiny_config(position="learned")).position_embeddings)
+
+    def test_rope_requires_even_head_dim(self):
+        config = _tiny_config(position="rope")
+        config.model.n_embd = 12  # head_dim = 12/4 = 3 (odd) -> RoPE must reject
+        with self.assertRaises(ValueError):
+            build_model(config)
+
+    def test_geglu_is_real_gated_not_aliased_to_gelu(self):
+        blocks = {
+            kind: build_model(_tiny_config(ffn=kind)).TransformerBlocks[0].feed_forward
+            for kind in ("gelu", "geglu", "swiglu")
+        }
+        self.assertIsInstance(blocks["gelu"], GELUFFN)
+        self.assertIsInstance(blocks["geglu"], GEGLUFFN)  # NOT a GELUFFN alias
+        self.assertIsInstance(blocks["swiglu"], SwiGLUFFN)
+        # Gated FFNs carry an extra input projection, so they have more params than plain GELU.
+        self.assertGreater(
+            _params(build_model(_tiny_config(ffn="geglu"))), _params(build_model(_tiny_config(ffn="gelu")))
+        )
+
+    def test_ffn_mult_scales_params(self):
+        self.assertLess(_params(build_model(_tiny_config(ffn_mult=2))), _params(build_model(_tiny_config(ffn_mult=8))))
 
 
 class LoRATests(unittest.TestCase):

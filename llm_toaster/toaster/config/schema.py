@@ -32,8 +32,9 @@ class ModelConfig:
     seq_len: int = 1024
     dropout_rate: float = 0.2
     norm: str = "layernorm"  # layernorm | rmsnorm
-    ffn: str = "gelu"  # gelu | swiglu | geglu | moe placeholder
-    position: str = "learned"  # learned | rope placeholder
+    ffn: str = "gelu"  # gelu | geglu | swiglu | moe placeholder
+    ffn_mult: int = 4  # FFN hidden expansion ratio (hidden = ffn_mult * n_embd)
+    position: str = "learned"  # learned | rope | none
     num_key_value_heads: Optional[int] = None
     tie_embeddings: bool = True
 
@@ -279,7 +280,8 @@ class ConfigHandler:
             )
         _require(self.model.norm in {"layernorm", "rmsnorm"}, "model.norm must be layernorm or rmsnorm")
         _require(self.model.ffn in {"gelu", "geglu", "swiglu", "moe"}, "model.ffn must be gelu, geglu, swiglu, or moe")
-        _require(self.model.position in {"learned", "rope"}, "model.position must be learned or rope")
+        _require(self.model.ffn_mult > 0, "model.ffn_mult must be positive")
+        _require(self.model.position in {"learned", "rope", "none"}, "model.position must be learned, rope, or none")
         _require(self.optimizer.name in {"adamw", "fused_adamw"}, "optimizer.name must be adamw or fused_adamw")
         _require(self.scheduler.name in {"constant", "cosine"}, "scheduler.name must be constant or cosine")
         _require(
@@ -327,8 +329,6 @@ class ConfigHandler:
             )
         if self.model.ffn == "moe":
             raise NotImplementedError("model.ffn='moe' is reserved but not implemented yet")
-        if self.model.position == "rope":
-            raise NotImplementedError("model.position='rope' is reserved but not implemented yet")
         if self.attention.backend in {"flash_attn_2", "xformers"}:
             raise NotImplementedError(f"attention.backend={self.attention.backend!r} integration is not wired yet")
         if self.tokenizer.type in {"sp", "sentencepiece"}:

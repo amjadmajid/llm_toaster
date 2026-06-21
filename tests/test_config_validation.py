@@ -48,7 +48,6 @@ class ConfigValidationTests(unittest.TestCase):
             ("distributed", "backend", "ddp"),
             ("distributed", "backend", "accelerate"),
             ("model", "ffn", "moe"),
-            ("model", "position", "rope"),
             ("attention", "backend", "flash_attn_2"),
             ("attention", "backend", "xformers"),
             ("tokenizer", "type", "sentencepiece"),
