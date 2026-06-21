@@ -2,7 +2,10 @@
 
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from llm_toaster.toaster.experiments import sweep
 from llm_toaster.toaster.experiments.aggregate import aggregate_runs, to_markdown
 from llm_toaster.toaster.experiments.sweep import build_runs, run_sweep
 
@@ -61,6 +64,43 @@ class SweepEndToEndTests(unittest.TestCase):
             run_sweep(spec)  # second pass should skip (done markers exist), not retrain
             for metrics_path, mtime in before.items():
                 self.assertEqual(metrics_path.stat().st_mtime_ns, mtime)
+
+
+class SweepFaultIsolationTests(unittest.TestCase):
+    def test_failed_run_does_not_abort_sweep(self):
+        """A cell that raises is recorded and skipped; later cells still run."""
+
+        class _FlakyEngine:
+            def __init__(self, config):
+                self.config = config
+
+            def train(self):
+                if self.config.model.ffn == "gelu":
+                    raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as td:
+            spec = _spec(td)  # axes -> ffn: [gelu, swiglu]
+            with mock.patch.object(sweep, "TrainingEngine", _FlakyEngine):
+                completed = run_sweep(spec)  # cpu -> in-process
+
+            gelu_dir = Path(td) / "ffn=gelu__seed0"
+            swiglu_dir = Path(td) / "ffn=swiglu__seed0"
+            # The failure was isolated: gelu marked failed (no done), swiglu still ran.
+            self.assertTrue((gelu_dir / "failed").exists())
+            self.assertFalse((gelu_dir / "done").exists())
+            self.assertIn("boom", (gelu_dir / "failed").read_text())
+            self.assertTrue((swiglu_dir / "done").exists())
+            self.assertEqual(completed, [swiglu_dir])
+
+    def test_isolated_subprocess_path(self):
+        """Forcing isolation actually trains the cell in a spawned subprocess."""
+        with tempfile.TemporaryDirectory() as td:
+            spec = _spec(td)
+            spec["axes"] = {"model.ffn": ["gelu"]}  # single cell keeps the spawn cheap
+            run_dirs = run_sweep(spec, isolate=True)
+            self.assertEqual(len(run_dirs), 1)
+            self.assertTrue((run_dirs[0] / "metrics.jsonl").exists())
+            self.assertTrue((run_dirs[0] / "done").exists())
 
 
 if __name__ == "__main__":
