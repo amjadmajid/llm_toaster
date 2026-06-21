@@ -201,8 +201,7 @@ def main() -> None:
     parser.add_argument(
         "--no-isolate",
         action="store_true",
-        help="Run every cell in-process (no subprocess isolation); useful for debugging with "
-        "CUDA_LAUNCH_BLOCKING=1.",
+        help="Run every cell in-process (no subprocess isolation); useful for debugging with CUDA_LAUNCH_BLOCKING=1.",
     )
     args = parser.parse_args()
     run_sweep(load_spec(args.spec), force=args.force, isolate=False if args.no_isolate else None)
