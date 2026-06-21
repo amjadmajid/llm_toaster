@@ -6,6 +6,7 @@ per-step console line is human-readable while ``logs/metrics.jsonl`` is machine-
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -130,6 +131,50 @@ class JsonlMetricsWriter:
         if self._handle is not None:
             self._handle.write(json.dumps(record) + "\n")
             self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+
+class CsvMetricsWriter:
+    """Append-only CSV writer for (flat) step records; a falsy path disables it.
+
+    Column order is fixed from the first record (or an existing file's header on resume); later
+    records are aligned to that header -- extra keys are dropped, missing keys written blank -- so
+    the file stays rectangular and easy to load with pandas/csv. Flushes each row.
+    """
+
+    def __init__(self, path: str | None):
+        self.path = path
+        self._handle = None
+        self._writer = None
+        self._fieldnames = None
+        if not path:
+            return
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        header = None
+        if target.exists() and target.stat().st_size > 0:
+            with open(path, "r", encoding="utf-8", newline="") as existing:
+                first_line = existing.readline().strip()
+            if first_line:
+                header = next(csv.reader([first_line]))
+        self._handle = open(path, "a", encoding="utf-8", newline="")
+        if header:
+            self._fieldnames = header
+            self._writer = csv.DictWriter(self._handle, fieldnames=header, extrasaction="ignore")
+
+    def write(self, record: dict) -> None:
+        if self._handle is None:
+            return
+        if self._writer is None:
+            self._fieldnames = list(record.keys())
+            self._writer = csv.DictWriter(self._handle, fieldnames=self._fieldnames, extrasaction="ignore")
+            self._writer.writeheader()
+        self._writer.writerow({key: record.get(key, "") for key in self._fieldnames})
+        self._handle.flush()
 
     def close(self) -> None:
         if self._handle is not None:

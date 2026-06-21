@@ -123,3 +123,29 @@ two-token-ahead bug exists.
 - Full suite **92 passed**. `ruff check` + `ruff format --check` clean.
 - Live end-to-end interrupt: launched a real CPU run, sent SIGINT mid-loop → graceful exit (code 0),
   `emergency.pt` written atomically at step boundary (step 25), `wall_clock_s` recorded, no temp leftovers.
+
+## Stage 5 — structured logging + validation (issues #7, #8)
+
+**Production changes**
+- `training/metrics.py`: new `CsvMetricsWriter` — append-only, rectangular CSV of per-step records
+  (fixed header from the first record / existing file; extra keys dropped, missing keys blank; flushes
+  each row). Complements the existing JSONL writer (#7).
+- `config/schema.py`: `LoggingConfig.metrics_csv` (None → derive `metrics.csv` next to `metrics.jsonl`;
+  "" disables). Per-run sweep dirs get their own CSV automatically.
+- `training/engine.py`:
+  - Per-step records now also include `val_loss`, `val_perplexity`, `peak_mem_reserved_bytes`
+    (alongside the existing allocated `peak_mem_bytes`), `iter_time_ms` (step time), and `resumed`.
+    The architecture row now carries `git_commit`, `config_path`, and `resumed` (#7).
+  - Validation is evaluated *before* the log block so the freshest `val_loss` lands in the same record;
+    `last_val_loss` is tracked and surfaced. A resolved-config snapshot is written up front (#7, #8).
+  - Step records are written to both JSONL and the new CSV; both writers are closed in `finally`.
+
+**Verified**
+- New test `test_structured_logging_csv_jsonl_and_validation`: JSONL architecture row has git/config;
+  step rows carry the required keys + `peak_mem_reserved_bytes`; validation loss is surfaced; an oversized
+  `eval_steps` (more than available val batches) wraps shards without crashing; CSV exists, parses, and
+  every row has `step/loss/tokens_per_sec/elapsed_s` populated (#7, #8).
+- Inspected real output: arch row keys include `git_commit`/`config_path`/`resumed`; CSV header is
+  rectangular (`step,…,val_loss,val_perplexity,iter_time_ms,…,peak_mem_reserved_bytes,resumed`).
+- Full suite **93 passed**; `ruff check` + `ruff format --check` clean. Note: `elapsed_s` is the elapsed
+  time field (kept its name; aggregate.py is unaffected — it reads `peak_mem_bytes`, still present).

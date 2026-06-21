@@ -114,6 +114,8 @@ class LoggingConfig:
     log_file: str = "logs/log.txt"
     log_every_steps: int = 20
     metrics_file: str = "logs/metrics.jsonl"  # machine-readable per-step metrics; "" disables
+    # CSV copy of the per-step metrics. None -> derive from metrics_file (.jsonl -> .csv); "" disables.
+    metrics_csv: Optional[str] = None
     device_peak_flops: Optional[float] = None  # device peak FLOP/s for MFU; None disables MFU
 
 

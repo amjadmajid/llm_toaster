@@ -20,10 +20,11 @@ from ..data.adapters import JsonlSFTDataLoader
 from ..models.registry import build_model
 from ..peft.lora import inject_lora, lora_state_dict
 from ..tokenizers import build_tokenizer
+from .checkpointing import git_commit, rotate_checkpoints
 from .checkpointing import load_checkpoint as load_training_checkpoint
-from .checkpointing import rotate_checkpoints
 from .checkpointing import save_checkpoint as save_training_checkpoint
 from .metrics import (
+    CsvMetricsWriter,
     JsonlMetricsWriter,
     architecture_summary,
     compute_mfu,
@@ -51,6 +52,8 @@ class TrainingEngine:
         self._original_signal_handlers = {}
         self._stop_requested = False
         self._stop_signum = None
+        self.last_val_loss = None
+        self.resumed = False
         self.tokenizer = None
         self.model = None
         self.optimizer = None
@@ -199,25 +202,37 @@ class TrainingEngine:
         self.setup_scaler()
         self._resume_if_requested()
 
+        self._save_legacy_config_if_needed()  # write a resolved-config snapshot up front
         metrics = JsonlMetricsWriter(self.config.logging.metrics_file)
+        csv_metrics = CsvMetricsWriter(self._metrics_csv_path())
         summary = architecture_summary(self.model, self.config)
         for line in format_architecture_summary(summary):
             logger.info(line)
-        metrics.write({"type": "architecture", **summary})
+        metrics.write(
+            {
+                "type": "architecture",
+                **summary,
+                "git_commit": git_commit(),
+                "config_path": self._resolved_config_path(),
+                "resumed": self.resumed,
+            }
+        )
 
         if "cuda" in str(self.device):
             torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         self._run_start = start
-        last_log_time, last_log_tokens = start, self.tokens_seen
+        last_log_time, last_log_tokens, last_log_step = start, self.tokens_seen, self.global_step
         log_every = max(1, self.config.logging.log_every_steps)
         self._install_signal_handlers()
         try:
             while self.global_step < self.config.training.max_iter:
                 loss = self.train_step()
+                metric = self._maybe_evaluate()  # before logging so the latest val_loss is recorded
                 if self.global_step % log_every == 0:
                     now = time.perf_counter()
                     interval = now - last_log_time
+                    steps_since = max(1, self.global_step - last_log_step)
                     tokens_per_sec = (self.tokens_seen - last_log_tokens) / interval if interval > 0 else 0.0
                     elapsed_total = self._elapsed_seconds_total()
                     record = {
@@ -228,17 +243,22 @@ class TrainingEngine:
                         "grad_norm": self.last_grad_norm,
                         "tokens_per_sec": tokens_per_sec,
                         "tokens_seen": self.tokens_seen,
+                        "val_loss": self.last_val_loss,
+                        "val_perplexity": (perplexity(self.last_val_loss) if self.last_val_loss is not None else None),
+                        "iter_time_ms": (interval / steps_since) * 1000.0,
                         "elapsed_s": elapsed_total,
                         "eta_s": self._eta_seconds(elapsed_total),
                         "mfu": compute_mfu(
                             summary["flops_per_token"], tokens_per_sec, self.config.logging.device_peak_flops
                         ),
                         "peak_mem_bytes": self._peak_mem_bytes(),
+                        "peak_mem_reserved_bytes": self._peak_mem_reserved_bytes(),
+                        "resumed": self.resumed,
                     }
                     logger.info(format_metrics_line(record))
                     metrics.write({"type": "step", **record})
-                    last_log_time, last_log_tokens = now, self.tokens_seen
-                metric = self._maybe_evaluate()
+                    csv_metrics.write(record)
+                    last_log_time, last_log_tokens, last_log_step = now, self.tokens_seen, self.global_step
                 self._maybe_save(metric)
                 if self._stop_requested:  # interrupt requested -> stop at this clean step boundary
                     break
@@ -256,6 +276,7 @@ class TrainingEngine:
             self._run_start = None
             self._restore_signal_handlers()
             metrics.close()
+            csv_metrics.close()
         return self
 
     def _eta_seconds(self, elapsed: float) -> float:
@@ -266,6 +287,21 @@ class TrainingEngine:
 
     def _peak_mem_bytes(self) -> int:
         return int(torch.cuda.max_memory_allocated()) if "cuda" in str(self.device) else 0
+
+    def _peak_mem_reserved_bytes(self) -> int:
+        return int(torch.cuda.max_memory_reserved()) if "cuda" in str(self.device) else 0
+
+    def _metrics_csv_path(self) -> str | None:
+        """CSV metrics path: explicit ``logging.metrics_csv`` ('' disables), else derived from the
+        JSONL path so it lands next to it (works for per-run sweep directories too)."""
+        explicit = self.config.logging.metrics_csv
+        if explicit is not None:
+            return explicit or None
+        jsonl = self.config.logging.metrics_file
+        return str(Path(jsonl).with_suffix(".csv")) if jsonl else None
+
+    def _resolved_config_path(self) -> str:
+        return self.config.finetune.output_config if self.is_finetune_mode else self.config.training.ckpt_config
 
     def _elapsed_seconds_total(self) -> float:
         """Cumulative training seconds across resumes (perf_counter deltas, never timestamps)."""
@@ -418,6 +454,7 @@ class TrainingEngine:
         checkpoint = self.config.checkpointing.resume_from_checkpoint
         if checkpoint:
             self.load_checkpoint(checkpoint)
+            self.resumed = True
 
     def _maybe_evaluate(self) -> float | None:
         if self.val_loader is None:
@@ -426,6 +463,7 @@ class TrainingEngine:
             return None
         metric = self.eval_step()
         if metric is not None:
+            self.last_val_loss = metric
             logger.info("step %s validation loss %.4f (perplexity %.2f)", self.global_step, metric, perplexity(metric))
             if self.best_metric is None or metric < self.best_metric:
                 self.best_metric = metric

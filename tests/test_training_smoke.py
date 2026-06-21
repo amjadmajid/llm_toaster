@@ -5,9 +5,12 @@ The tokenizer falls back to a byte-level encoder when tiktoken assets cannot be
 downloaded, so these tests run offline.
 """
 
+import csv
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
@@ -40,8 +43,6 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertTrue(os.path.exists(config.training.ckpt))
 
     def test_metrics_file_has_architecture_and_step_rows(self):
-        import json
-
         with tempfile.TemporaryDirectory() as td:
             config = _smoke_cfg(td, "pretrain")
             TrainingEngine(config).train()
@@ -51,6 +52,38 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertIn("step", types)
             step_rows = [r for r in rows if r["type"] == "step"]
             self.assertTrue(all({"loss", "lr", "tokens_per_sec"} <= r.keys() for r in step_rows))
+
+    def test_structured_logging_csv_jsonl_and_validation(self):
+        # Issue #7/#8: per-step metrics in both JSONL and CSV; architecture row carries git/config;
+        # validation loss is surfaced in the records; oversized eval_steps must not crash (shards wrap).
+        with tempfile.TemporaryDirectory() as td:
+            config = _smoke_cfg(td, "pretrain")
+            config.training.max_iter = 2
+            config.logging.log_every_steps = 1
+            config.evaluation.eval_every_steps = 1
+            config.evaluation.eval_steps = 50  # more than available val batches -> must wrap, not crash
+            TrainingEngine(config).train()
+
+            rows = [json.loads(line) for line in open(config.logging.metrics_file, encoding="utf-8")]
+            arch = next(r for r in rows if r["type"] == "architecture")
+            self.assertIn("git_commit", arch)
+            self.assertIn("config_path", arch)
+            step_rows = [r for r in rows if r["type"] == "step"]
+            self.assertTrue(step_rows)
+            for record in step_rows:
+                self.assertTrue({"step", "loss", "tokens_per_sec", "elapsed_s"} <= record.keys())
+                self.assertIn("peak_mem_reserved_bytes", record)
+            self.assertTrue(any(r.get("val_loss") is not None for r in step_rows))  # validation surfaced
+
+            csv_path = str(Path(config.logging.metrics_file).with_suffix(".csv"))
+            self.assertTrue(os.path.exists(csv_path))
+            with open(csv_path, newline="", encoding="utf-8") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertTrue(csv_rows)
+            for record in csv_rows:
+                for key in ("step", "loss", "tokens_per_sec", "elapsed_s"):
+                    self.assertIn(key, record)
+                    self.assertNotEqual(record[key], "")
 
     def test_finetune_runs_on_jsonl_fixture(self):
         with tempfile.TemporaryDirectory() as td:
