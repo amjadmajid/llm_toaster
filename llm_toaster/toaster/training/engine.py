@@ -14,10 +14,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from dataspace import DataLoaderLite
-
 from ..config import ConfigHandler
 from ..data.adapters import JsonlSFTDataLoader
+from ..data.errors import DataExhausted
+from ..data.protocol import PretrainBatchInfo
+from ..data.sources import build_pretrain_train_source, build_validation_source
 from ..models.registry import build_model
 from ..peft.lora import inject_lora, lora_state_dict
 from ..tokenizers import build_tokenizer
@@ -31,6 +32,7 @@ from .metrics import (
     compute_mfu,
     format_architecture_summary,
     format_metrics_line,
+    human_count,
 )
 from .optim import build_optimizer, build_scheduler
 
@@ -53,8 +55,16 @@ class TrainingEngine:
         self.device = self.config.training.device
         self.global_step = self.config.training.training_step
         self.tokens_seen = 0
+        self.unique_tokens_seen = 0
+        self.repeated_tokens_seen = 0
+        self.data_pass = 0
+        self.current_shard_id = None
+        self.data_wait_s = 0.0
         self.best_metric = None
         self.current_shard = self.config.training.current_shard
+        self.coordinator = None
+        self.max_steps = self.config.training.max_iter
+        self._data_exhausted = False
         # Cumulative training seconds across resumes (elapsed time, not wall-clock timestamps).
         self.wall_clock_s = float(self.config.training.training_duration)
         self._run_start = None
@@ -94,8 +104,10 @@ class TrainingEngine:
             self.train_loader = self._setup_sft_loader()
             self.val_loader = None
         else:
-            self.train_loader = self._setup_pretrain_loader(split="train", current_shard=self.current_shard)
-            self.val_loader = self._try_setup_validation_loader()
+            # build_pretrain_train_source may start a background prefetch producer; the engine owns
+            # its lifecycle and stops it in train()'s finally block.
+            self.train_loader, self.coordinator = build_pretrain_train_source(self.config, self.tokenizer)
+            self.val_loader = build_validation_source(self.config)
         return self.train_loader, self.val_loader
 
     def setup_optimizer(self):
@@ -117,15 +129,32 @@ class TrainingEngine:
         return self.scaler
 
     def train_step(self) -> float:
+        """Run one optimizer step over ``n_batches`` micro-batches.
+
+        Token accounting is committed only after a *full* step succeeds, so a ``DataExhausted``
+        mid gradient-accumulation discards the partial step cleanly (zero grads, no optimizer/step
+        advance, no token counting) and propagates to the loop, which stops at this boundary.
+        """
         self.model.train()
         if self.scaler is None:
             self.setup_scaler()
         self.optimizer.zero_grad(set_to_none=True)
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
         total_loss = 0.0
+        step_tokens = step_unique = step_repeated = 0
+        last_info = None
 
         for _ in range(self.config.training.n_batches):
-            x, y, shard = self.train_loader.next_batch()
+            try:
+                x, y, info = self.train_loader.next_batch()
+            except DataExhausted:
+                # Discard the incomplete step; do not advance the optimizer or global step.
+                self.optimizer.zero_grad(set_to_none=True)
+                logger.warning(
+                    "data exhausted mid gradient-accumulation at step %d; discarding the incomplete step",
+                    self.global_step,
+                )
+                raise
             x = torch.as_tensor(x, dtype=torch.long, device=self.device)
             y = torch.as_tensor(y, dtype=torch.long, device=self.device)
             with self._autocast_context():
@@ -134,8 +163,13 @@ class TrainingEngine:
                 loss = loss / self.config.training.n_batches
             self.scaler.scale(loss).backward()
             total_loss += float(loss.detach().cpu())
-            self.tokens_seen += x.numel()
-            self.current_shard = shard
+            tokens = int(x.numel())
+            step_tokens += tokens
+            if isinstance(info, PretrainBatchInfo) and info.repeated:
+                step_repeated += tokens
+            else:
+                step_unique += tokens
+            last_info = info
 
         trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if trainable_parameters:
@@ -145,22 +179,45 @@ class TrainingEngine:
         self.scaler.update()
         self.scheduler.step()
         self.global_step += 1
+        # Commit accounting now that the full step succeeded.
+        self.tokens_seen += step_tokens
+        self.unique_tokens_seen += step_unique
+        self.repeated_tokens_seen += step_repeated
+        if isinstance(last_info, PretrainBatchInfo):
+            self.data_pass = last_info.pass_index
+            self.current_shard_id = last_info.shard_id
         return total_loss
 
     @torch.no_grad()
     def eval_step(self) -> float | None:
+        """Average loss over the fixed validation set.
+
+        By default the validation cursor is reset before each eval so successive evaluations see
+        the *same* examples (comparable val curves). Uses the same autocast as training. The train
+        cursor is never touched. A fixed val set smaller than ``eval_steps`` simply stops early.
+        """
         if self.val_loader is None:
             return None
+        validation = self.config.data.validation
+        if validation.reset_each_eval and not validation.sequential:
+            try:
+                self.val_loader.reset()
+            except Exception:  # pragma: no cover - reset is best effort for non-resettable loaders
+                pass
         self.model.eval()
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
         losses = []
         for _ in range(self.config.evaluation.eval_steps):
-            x, y, _ = self.val_loader.next_batch()
+            try:
+                x, y, _ = self.val_loader.next_batch()
+            except DataExhausted:
+                break  # fixed validation smaller than eval_steps -> evaluate on what exists
             x = torch.as_tensor(x, dtype=torch.long, device=self.device)
             y = torch.as_tensor(y, dtype=torch.long, device=self.device)
-            logits = self.model(x)
-            losses.append(float(criterion(logits.view(-1, logits.size(-1)), y.view(-1)).cpu()))
-        return sum(losses) / max(1, len(losses))
+            with self._autocast_context():
+                logits = self.model(x)
+                losses.append(float(criterion(logits.view(-1, logits.size(-1)), y.view(-1)).cpu()))
+        return sum(losses) / max(1, len(losses)) if losses else None
 
     def save_checkpoint(self, path: str | None = None, metric: float | None = None) -> None:
         checkpoint_path = path or self.default_checkpoint_path
@@ -210,6 +267,7 @@ class TrainingEngine:
         self.setup_scheduler()
         self.setup_scaler()
         self._resume_if_requested()
+        self._compute_step_budget()
 
         self._save_legacy_config_if_needed()  # write a resolved-config snapshot up front
         metrics = JsonlMetricsWriter(self.config.logging.metrics_file)
@@ -217,10 +275,16 @@ class TrainingEngine:
         summary = architecture_summary(self.model, self.config)
         for line in format_architecture_summary(summary):
             logger.info(line)
+        for line in self._data_summary_lines():
+            logger.info(line)
         metrics.write(
             {
                 "type": "architecture",
                 **summary,
+                **self._data_metrics(),
+                "max_steps": self.max_steps,
+                "max_tokens": self.config.training.max_tokens,
+                "tokens_per_step": self._tokens_per_step(),
                 "git_commit": git_commit(),
                 "config_path": self._resolved_config_path(),
                 "resumed": self.resumed,
@@ -235,8 +299,27 @@ class TrainingEngine:
         log_every = max(1, self.config.logging.log_every_steps)
         self._install_signal_handlers()
         try:
-            while self.global_step < self.config.training.max_iter:
-                loss = self.train_step()
+            while self.global_step < self.max_steps:
+                if self._token_budget_reached():
+                    logger.info(
+                        "token budget reached (%d tokens, ~%d/step); stopping at step %d",
+                        self.config.training.max_tokens,
+                        self._tokens_per_step(),
+                        self.global_step,
+                    )
+                    self._data_exhausted = True
+                    break
+                try:
+                    loss = self.train_step()
+                except DataExhausted as exc:
+                    logger.warning(
+                        "unique data exhausted after %d pass(es); ending training at step %d",
+                        exc.pass_index,
+                        self.global_step,
+                    )
+                    self._data_exhausted = True
+                    break
+                self._update_consumer_cursor()
                 metric = self._maybe_evaluate()  # before logging so the latest val_loss is recorded
                 if self.global_step % log_every == 0:
                     now = time.perf_counter()
@@ -246,12 +329,14 @@ class TrainingEngine:
                     elapsed_total = self._elapsed_seconds_total()
                     record = {
                         "step": self.global_step,
-                        "max_iter": self.config.training.max_iter,
+                        "max_iter": self.max_steps,
                         "loss": loss,
                         "lr": self.scheduler.get_last_lr()[0],
                         "grad_norm": self.last_grad_norm,
                         "tokens_per_sec": tokens_per_sec,
                         "tokens_seen": self.tokens_seen,
+                        "unique_tokens_seen": self.unique_tokens_seen,
+                        "repeated_tokens_seen": self.repeated_tokens_seen,
                         "val_loss": self.last_val_loss,
                         "val_perplexity": (perplexity(self.last_val_loss) if self.last_val_loss is not None else None),
                         "iter_time_ms": (interval / steps_since) * 1000.0,
@@ -263,6 +348,7 @@ class TrainingEngine:
                         "peak_mem_bytes": self._peak_mem_bytes(),
                         "peak_mem_reserved_bytes": self._peak_mem_reserved_bytes(),
                         "resumed": self.resumed,
+                        **self._data_metrics(),
                     }
                     logger.info(format_metrics_line(record))
                     metrics.write({"type": "step", **record})
@@ -281,17 +367,122 @@ class TrainingEngine:
                     self.save_checkpoint(self._emergency_checkpoint_path())
                 except Exception:  # pragma: no cover - emergency save is best effort
                     logger.exception("emergency checkpoint failed")
+            elif self._data_exhausted:
+                # Clean stop at a step boundary (exhaustion or token budget): save a final checkpoint.
+                try:
+                    self.save_checkpoint()
+                except Exception:  # pragma: no cover - best effort
+                    logger.exception("final checkpoint failed")
             self.wall_clock_s = self._elapsed_seconds_total()
             self._run_start = None
             self._restore_signal_handlers()
+            self._close_data_sources()
             metrics.close()
             csv_metrics.close()
         return self
 
+    def _compute_step_budget(self) -> None:
+        """Effective max optimizer steps = min(max_iter, floor(max_tokens / tokens_per_step))."""
+        max_iter = self.config.training.max_iter
+        max_tokens = self.config.training.max_tokens
+        if max_tokens is None:
+            self.max_steps = max_iter
+            return
+        steps_from_tokens = max_tokens // max(1, self._tokens_per_step())
+        self.max_steps = min(max_iter, int(steps_from_tokens))
+
+    def _tokens_per_step(self) -> int:
+        return self.config.training.batch_size * self.config.model.seq_len * self.config.training.n_batches
+
+    def _token_budget_reached(self) -> bool:
+        """True when starting another full step would exceed ``training.max_tokens``."""
+        max_tokens = self.config.training.max_tokens
+        if max_tokens is None:
+            return False
+        return self.tokens_seen + self._tokens_per_step() > max_tokens
+
+    def _update_consumer_cursor(self) -> None:
+        """Tell the prefetch producer how many train shards we've consumed (bounds the queue)."""
+        if self.coordinator is None:
+            return
+        consumed = getattr(self.train_loader, "consumed_shard_count", None)
+        if callable(consumed):
+            try:
+                self.coordinator.update_consumer(consumed())
+            except Exception:  # pragma: no cover - advisory bookkeeping
+                pass
+
+    def _close_data_sources(self) -> None:
+        for loader in (self.train_loader, self.val_loader):
+            closer = getattr(loader, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+        if self.coordinator is not None:
+            try:
+                self.coordinator.stop()
+            except Exception:  # pragma: no cover - best effort
+                logger.exception("prefetch coordinator stop failed")
+
+    def _data_metrics(self) -> dict:
+        """Low-cardinality data fields for metrics records (no token buffers / large values)."""
+        stats = {}
+        getter = getattr(self.train_loader, "stats", None)
+        if callable(getter):
+            try:
+                stats = getter()
+            except Exception:  # pragma: no cover
+                stats = {}
+        producer = self._producer_metrics()
+        return {
+            "data_mode": self.config.data.materialization.mode,
+            "dataset_id": stats.get("dataset_id"),
+            "dataset_fingerprint": stats.get("dataset_fingerprint"),
+            "manifest_generation": stats.get("manifest_generation"),
+            "current_shard_id": stats.get("current_shard_id", self.current_shard_id),
+            "data_pass": self.data_pass,
+            "unique_tokens_seen": self.unique_tokens_seen,
+            "repeated_tokens_seen": self.repeated_tokens_seen,
+            "data_wait_s": stats.get("data_wait_s", self.data_wait_s),
+            "source_records_consumed": stats.get("source_records_consumed"),
+            **producer,
+        }
+
+    def _producer_metrics(self) -> dict:
+        if self.coordinator is None:
+            return {}
+        status = self.coordinator.status()
+        return {
+            "producer_status": status.get("status"),
+            "producer_queue_depth": status.get("queue_depth"),
+        }
+
+    def _data_summary_lines(self) -> list[str]:
+        """Concise startup data summary (mode, dataset, budget, exhaustion)."""
+        data = self.config.data
+        tps = self._tokens_per_step()
+        budget = self.config.training.max_tokens or (self.max_steps * tps)
+        stats = self._data_metrics()
+        dataset = stats.get("dataset_id") or ("legacy-dir" if self._is_legacy_data() else "(pending)")
+        lines = [
+            f"data: mode={data.materialization.mode} | dataset={dataset} | exhaustion={data.sampling.exhaustion}",
+        ]
+        if stats.get("manifest_generation") is not None:
+            lines.append(f"manifest: generation={stats['manifest_generation']}")
+        lines.append(f"budget: {human_count(budget)} tokens | {tps:,} tokens/step | up to {self.max_steps:,} steps")
+        if data.materialization.mode == "prefetch":
+            lines.append(f"exhaustion: wait | prefetch queue target={data.materialization.prefetch_shards} shards")
+        return lines
+
+    def _is_legacy_data(self) -> bool:
+        return getattr(self.config, "_data_is_legacy", False) and not self.is_finetune_mode
+
     def _eta_seconds(self, elapsed: float) -> float:
         if self.global_step <= 0:
             return 0.0
-        remaining = max(0, self.config.training.max_iter - self.global_step)
+        remaining = max(0, self.max_steps - self.global_step)
         return remaining * (elapsed / self.global_step)
 
     def _peak_mem_bytes(self) -> int:
@@ -378,14 +569,25 @@ class TrainingEngine:
         return self.config.training.ckpt
 
     def data_state_dict(self) -> dict:
-        state = {"current_shard": self.current_shard}
+        """Resume state: engine token/pass counters + the source's own cursor/identity state."""
+        state = {
+            "current_shard": self.current_shard,
+            "unique_tokens_seen": self.unique_tokens_seen,
+            "repeated_tokens_seen": self.repeated_tokens_seen,
+            "data_pass": self.data_pass,
+        }
         if hasattr(self.train_loader, "state_dict"):
             state["train_loader"] = self.train_loader.state_dict()
         return state
 
     def load_data_state_dict(self, state: dict) -> None:
         self.current_shard = int(state.get("current_shard", self.current_shard))
+        self.unique_tokens_seen = int(state.get("unique_tokens_seen", self.unique_tokens_seen))
+        self.repeated_tokens_seen = int(state.get("repeated_tokens_seen", self.repeated_tokens_seen))
+        self.data_pass = int(state.get("data_pass", self.data_pass))
         if self.train_loader is not None and hasattr(self.train_loader, "load_state_dict"):
+            # The source validates dataset identity/revision/tokenizer/transform/shard checksum
+            # and the committed manifest prefix here, raising ResumeIncompatibleError on a mismatch.
             self.train_loader.load_state_dict(state.get("train_loader", {}))
 
     def _setup_sft_loader(self):
@@ -399,26 +601,6 @@ class TrainingEngine:
             seed=self.config.finetune.seed,
             shuffle=self.config.finetune.shuffle,
         )
-
-    def _setup_pretrain_loader(self, split: str, current_shard: int = 0):
-        return DataLoaderLite(
-            self.config.training.batch_size,
-            self.config.training.seq_len,
-            current_shard,
-            0,
-            1,
-            split,
-            data_root=self.config.training.data_dir,
-        )
-
-    def _try_setup_validation_loader(self):
-        if self.config.evaluation.eval_every_steps <= 0:
-            return None
-        try:
-            return self._setup_pretrain_loader(split="val")
-        except (AssertionError, FileNotFoundError) as exc:
-            logger.info("Validation data unavailable; continuing without validation: %s", exc)
-            return None
 
     def _autocast_context(self):
         enabled = "cuda" in str(self.device) and self.config.distributed.mixed_precision in {"fp16", "bf16"}
@@ -519,7 +701,7 @@ class TrainingEngine:
 
     def _maybe_save(self, metric: float | None) -> None:
         should_save = self.global_step % self.config.checkpointing.save_every_steps == 0
-        is_last_step = self.global_step >= self.config.training.max_iter
+        is_last_step = self.global_step >= self.max_steps
         if should_save or is_last_step:
             self.save_checkpoint(metric=metric)
 

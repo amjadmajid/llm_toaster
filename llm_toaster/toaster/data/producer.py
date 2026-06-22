@@ -272,10 +272,10 @@ def run_producer_process(spec: dict, stop_event: threading.Event | None = None) 
             transform=transform,
         )
 
-    from .hf_source import open_hf_stream
+    from .document_streams import open_document_stream
 
     def source_factory():
-        return iter(open_hf_stream(source))
+        return open_document_stream(source)
 
     producer = ShardProducer(
         store,

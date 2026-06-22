@@ -297,7 +297,8 @@ class ManifestShardSource:
             repeated=self.repeated,
             source_mode=SOURCE_MODE,
         )
-        return np.asarray(x), np.asarray(y), info
+        # Copy the small window out of the (read-only) memory map so torch gets a writable array.
+        return np.array(x), np.array(y), info
 
     def reset(self) -> None:
         self._release_tokens()
@@ -347,6 +348,10 @@ class ManifestShardSource:
         self._load_order_position(order_pos, verify=True)
         self.current_position = int(state.get("token_offset", 0))
         self.unique_tokens_emitted = int(state.get("unique_tokens_seen", 0))
+
+    def consumed_shard_count(self) -> int:
+        """How many train shards have been fully passed (used to bound the prefetch queue)."""
+        return self._order_pos
 
     def stats(self) -> dict:
         return {
