@@ -111,6 +111,141 @@ class DefaultsRoundTripTests(unittest.TestCase):
         self.assertEqual(reloaded.to_dict(), ConfigHandler().to_dict())
 
 
+class NestedDataConfigTests(unittest.TestCase):
+    """Stage: orthogonal nested data config (source/transform/materialization/sampling/validation)."""
+
+    def _write(self, td, text):
+        path = Path(td) / "cfg.yaml"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def test_nested_sections_parse(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(
+                td,
+                "data:\n"
+                "  manifest_path: /tmp/m.json\n"
+                "  source:\n    dataset_name: foo/bar\n    config_name: x\n"
+                "  transform:\n    shard_tokens: 123\n    dtype: uint32\n"
+                "  materialization:\n    mode: prepared\n    store_dir: /tmp/store\n"
+                "  sampling:\n    exhaustion: repeat\n    shuffle: shard\n"
+                "  validation:\n    shards: 2\n",
+            )
+            cfg = ConfigHandler.from_yaml(path)
+            self.assertEqual(cfg.data.source.dataset_name, "foo/bar")
+            self.assertEqual(cfg.data.transform.shard_tokens, 123)
+            self.assertEqual(cfg.data.transform.dtype, "uint32")
+            self.assertEqual(cfg.data.sampling.exhaustion, "repeat")
+            self.assertEqual(cfg.data.validation.shards, 2)
+            self.assertFalse(cfg._data_is_legacy)
+
+    def test_unknown_nested_key_names_full_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "data:\n  materialization:\n    mode: prepared\n    bogus_knob: 1\n")
+            with self.assertRaises(ConfigError) as ctx:
+                ConfigHandler.from_yaml(path)
+            message = str(ctx.exception)
+            self.assertIn("materialization", message)
+            self.assertIn("bogus_knob", message)
+
+    def test_non_mapping_nested_section_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "data:\n  source: 5\n")
+            with self.assertRaises(ConfigError):
+                ConfigHandler.from_yaml(path)
+
+    def test_nested_round_trip(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, "data:\n  materialization:\n    mode: prefetch\n  source:\n    dataset_name: a/b\n")
+            cfg = ConfigHandler.from_yaml(path)
+            out = Path(td) / "out.yaml"
+            cfg.to_yaml(str(out))
+            reloaded = ConfigHandler.from_yaml(str(out))
+            self.assertEqual(reloaded.data.materialization.mode, "prefetch")
+            self.assertEqual(reloaded.data.source.dataset_name, "a/b")
+
+
+class LegacyDataDeprecationTests(unittest.TestCase):
+    def test_legacy_data_config_warns_and_translates(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = ConfigHandler.from_yaml("config/smoke_test_config.yaml")
+        self.assertTrue(any(issubclass(w.category, DeprecationWarning) for w in caught))
+        self.assertTrue(cfg._data_is_legacy)
+        # Legacy fields are mirrored into the new structure.
+        self.assertEqual(cfg.data.source.dataset_name, cfg.data.dataset_name)
+        self.assertEqual(cfg.data.materialization.store_dir, cfg.training.data_dir)
+
+    def test_new_style_config_does_not_warn(self):
+        import warnings
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "cfg.yaml"
+            path.write_text("data:\n  materialization:\n    mode: prepared\n", encoding="utf-8")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cfg = ConfigHandler.from_yaml(str(path))
+            self.assertFalse(any(issubclass(w.category, DeprecationWarning) for w in caught))
+            self.assertFalse(cfg._data_is_legacy)
+
+
+class DataValidationRulesTests(unittest.TestCase):
+    def test_prefetch_requires_materializable_source(self):
+        cfg = ConfigHandler()
+        cfg.data.materialization.mode = "prefetch"
+        cfg.data.source.dataset_name = ""
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
+    def test_direct_requires_fixed_validation_and_single_process(self):
+        cfg = ConfigHandler()
+        cfg.data.materialization.mode = "direct"
+        with self.assertRaises(ValueError):  # no validation.manifest_path
+            cfg.validate()
+        cfg.data.validation.manifest_path = "/tmp/val.json"
+        cfg.training.num_workers = 2
+        with self.assertRaises(ValueError):  # workers must be 0
+            cfg.validate()
+        cfg.training.num_workers = 0
+        cfg.validate()  # now valid
+
+    def test_wait_requires_prefetch_or_external_producer(self):
+        cfg = ConfigHandler()
+        cfg.data.sampling.exhaustion = "wait"
+        cfg.data.materialization.mode = "prepared"
+        with self.assertRaises(ValueError):
+            cfg.validate()
+        cfg.data.materialization.external_producer = True
+        cfg.validate()  # external producer declared -> allowed
+
+    def test_uint16_requires_small_vocab(self):
+        cfg = ConfigHandler()
+        cfg.model.vocab_size = 70000
+        cfg.data.transform.dtype = "uint16"
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
+    def test_validation_tokens_xor_shards(self):
+        cfg = ConfigHandler()
+        cfg.data.validation.tokens = 1000
+        cfg.data.validation.shards = 2
+        with self.assertRaises(ValueError):
+            cfg.validate()
+
+    def test_max_tokens_must_fit_one_step(self):
+        cfg = ConfigHandler()
+        cfg.training.batch_size = 4
+        cfg.training.seq_len = 8
+        cfg.training.n_batches = 2  # one step = 64 tokens
+        cfg.training.max_tokens = 10
+        with self.assertRaises(ValueError):
+            cfg.validate()
+        cfg.training.max_tokens = 640
+        cfg.validate()
+
+
 class ConfigLoadingErrorTests(unittest.TestCase):
     def _write(self, td, text):
         path = Path(td) / "cfg.yaml"

@@ -12,6 +12,7 @@ training:
   eval_inter: 200
   eval_iter: 10
   max_iter: 100_000
+  max_tokens: null   # optional token budget; training stops at min(max_iter, max_tokens)
   dtype: "long"
   tokenizer_type: "gpt2"
   ckpt: "checkpoints/base_ckpt"
@@ -20,7 +21,6 @@ training:
   training_duration: 0.0
   training_step: 0
   log_file: "logs/pretrain_log.txt"
-  data_dir: "dataspace/fineweb"
   num_workers: 1
 
 finetune:
@@ -41,10 +41,42 @@ inference:
   pretrained_model_config: "babyGPT_base.yaml"
   generate_max_length: 50
 
-# Configurations used for data download and tokenization
+# Manifest-backed pretraining data (orthogonal source / transform / materialization / sampling / validation).
+# See docs/data-pipeline.md. Build shards once with: python scripts/data.py prepare --config <this file>
 data:
-  dataset_name: "HuggingFaceFW/fineweb-edu"
-  split_ratio: 0.98
-  tokenized_data: "dataspace/fineweb"
-  remote_name: "sample-10BT"
-  shard_size: 10_000_000
+  manifest_path: "dataspace/fineweb/manifest.json"
+
+  source:
+    type: huggingface
+    dataset_name: HuggingFaceFW/fineweb-edu
+    config_name: sample-10BT
+    split: train
+    revision: null            # resolved to an immutable commit SHA when preparing
+    text_field: text
+
+  transform:
+    add_eot: true
+    packing: contiguous
+    shard_tokens: 10_000_000
+    dtype: uint16
+
+  materialization:
+    mode: prepared            # prepared | prefetch | direct
+    store_dir: "dataspace/fineweb"
+    cache_dir: null
+    prefetch_shards: 3
+    min_ready_shards: 1
+    wait_timeout_s: 300
+    tokenizer_workers: 1
+    retain_consumed: true
+
+  sampling:
+    seed: 1337
+    exhaustion: stop          # stop | repeat | wait
+    shuffle: none             # none | shard
+
+  validation:
+    manifest_path: null
+    tokens: 10_000_000
+    shards: null
+    reset_each_eval: true

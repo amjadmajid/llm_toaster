@@ -8,7 +8,8 @@ into the newer sections for backward compatibility.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+import warnings
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -47,16 +48,82 @@ class TokenizerConfig:
 
 
 @dataclass
+class DataSourceConfig:
+    """Where raw documents come from (orthogonal to how they are materialized)."""
+
+    type: str = "huggingface"  # huggingface | local
+    dataset_name: str = "HuggingFaceFW/fineweb-edu"
+    config_name: Optional[str] = "sample-10BT"
+    split: str = "train"
+    revision: Optional[str] = None  # branch/tag/sha; resolved to an immutable commit when preparing
+    text_field: str = "text"
+
+
+@dataclass
+class DataTransformConfig:
+    """Deterministic tokenization + packing applied to produce shards."""
+
+    add_eot: bool = True
+    packing: str = "contiguous"  # contiguous (only supported mode)
+    shard_tokens: int = int(1e7)
+    dtype: str = "uint16"  # uint16 | uint32 | int32
+
+
+@dataclass
+class MaterializationConfig:
+    """How shards are produced/consumed: prepared (upfront), prefetch (background), direct (stream)."""
+
+    mode: str = "prepared"  # prepared | prefetch | direct
+    store_dir: Optional[str] = None  # persistent shard store (manifest + shards/) when no manifest_path
+    cache_dir: Optional[str] = None  # optional local read-through cache (does not change manifest identity)
+    prefetch_shards: int = 3  # bound on sealed-but-unconsumed train shards (prefetch)
+    min_ready_shards: int = 1  # train shards required before training starts (prefetch)
+    wait_timeout_s: float = 300.0  # max wait for a new shard / producer readiness
+    tokenizer_workers: int = 1  # one worker by default for correctness + resume safety
+    retain_consumed: bool = True  # keep consumed shards (needed for exact resume)
+    external_producer: bool = False  # set when a producer outside this process feeds a wait-mode loader
+
+
+@dataclass
+class SamplingConfig:
+    """How batches are sampled from the materialized data and what happens at exhaustion."""
+
+    seed: int = 1337
+    exhaustion: str = "stop"  # stop | repeat | wait
+    shuffle: str = "none"  # none | shard
+
+
+@dataclass
+class DataValidationConfig:
+    """Fixed, reproducible validation data (never grows during training)."""
+
+    manifest_path: Optional[str] = None  # use a separate validation manifest if set
+    tokens: Optional[int] = None  # size validation by token budget, or...
+    shards: Optional[int] = None  # ...by shard count (exactly one when generating validation)
+    reset_each_eval: bool = True  # reset the val cursor before each eval so evals are comparable
+    sequential: bool = False  # opt in to walking val sequentially instead of resetting
+
+
+@dataclass
 class DataConfig:
+    # Canonical manifest-backed pretraining data (new, orthogonal sub-sections).
+    manifest_path: Optional[str] = None
+    source: DataSourceConfig = field(default_factory=DataSourceConfig)
+    transform: DataTransformConfig = field(default_factory=DataTransformConfig)
+    materialization: MaterializationConfig = field(default_factory=MaterializationConfig)
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    validation: DataValidationConfig = field(default_factory=DataValidationConfig)
+    # SFT / generic data fields.
+    train_path: Optional[str] = None
+    eval_path: Optional[str] = None
+    format: str = "auto"
+    train_on_prompt: bool = False
+    # --- Legacy flat fields (deprecated; translated by apply_backward_compatibility) ---
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     split_ratio: float = 0.98
     tokenized_data: str = "dataspace/fineweb"
     remote_name: str = "sample-10BT"
     shard_size: int = int(1e7)
-    train_path: Optional[str] = None
-    eval_path: Optional[str] = None
-    format: str = "auto"
-    train_on_prompt: bool = False
 
 
 @dataclass
@@ -162,6 +229,7 @@ class TrainingConfig:
     eval_inter: int = 200
     eval_iter: int = 10
     max_iter: int = 100_000
+    max_tokens: Optional[int] = None  # optional token budget; stop at min(max_iter, max_tokens)
     dtype: str = "long"
     tokenizer_type: str = "gpt2"
     tokenizer_dir: str = "checkpoints/tokenizer_dir"
@@ -207,6 +275,10 @@ class ConfigHandler:
     finetune: FineTuneConfig = field(default_factory=FineTuneConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
 
+    # Runtime flag (not a serialized field): set by apply_backward_compatibility when an old-style
+    # data config was loaded, so the engine selects the deprecated LegacyShardDirSource path.
+    _data_is_legacy = False
+
     @staticmethod
     def from_yaml(filepath: str) -> "ConfigHandler":
         raw = _load_yaml(filepath)
@@ -222,18 +294,8 @@ class ConfigHandler:
         for section_name, section_cls in _SECTION_TYPES.items():
             if section_name not in raw:
                 continue
-            section_raw = raw[section_name]
-            if not isinstance(section_raw, dict):
-                raise ConfigError(
-                    f"{filepath}: section '{section_name}' must be a mapping, got {type(section_raw).__name__}"
-                )
-            valid = {f.name for f in fields(section_cls)}
-            bad = sorted(set(section_raw) - valid)
-            if bad:
-                raise ConfigError(
-                    f"{filepath}: unknown key(s) {bad} in section '{section_name}'. Valid keys: {sorted(valid)}"
-                )
-            setattr(config, section_name, section_cls(**section_raw))
+            section = _build_dataclass(section_cls, raw[section_name], f"{filepath}: section '{section_name}'")
+            setattr(config, section_name, section)
 
         config.apply_backward_compatibility(raw)
         try:
@@ -264,6 +326,34 @@ class ConfigHandler:
             self.data.train_on_prompt = self.finetune.train_on_prompt
         if self.training.tokenizer_type and "tokenizer" not in raw:
             self.tokenizer.type = "tiktoken" if self.training.tokenizer_type == "gpt2" else self.training.tokenizer_type
+        self._apply_legacy_data_compatibility(raw)
+
+    def _apply_legacy_data_compatibility(self, raw: dict) -> None:
+        """Translate the old flat data layout (``training.data_dir`` / ``data.{dataset_name,...}``)
+        into the new ``data.{source,transform,materialization}`` structure, once, with one warning.
+
+        Legacy pretraining runs read a *directory* of shards with no manifest; the engine keeps that
+        path working (via ``LegacyShardDirSource``) during the deprecation period.
+        """
+        data_raw = raw.get("data", {}) or {}
+        new_data_keys = {"manifest_path", "source", "transform", "materialization", "sampling", "validation"}
+        legacy_signals = bool(data_raw) or ("data_dir" in raw.get("training", {}))
+        self._data_is_legacy = legacy_signals and not (new_data_keys & set(data_raw))
+        if not self._data_is_legacy:
+            return
+        # Mirror legacy values so new-style tools/engine see a consistent view.
+        self.data.source.dataset_name = self.data.dataset_name
+        self.data.source.config_name = self.data.remote_name
+        self.data.transform.shard_tokens = self.data.shard_size
+        self.data.materialization.store_dir = self.training.data_dir or self.data.tokenized_data
+        warnings.warn(
+            "Legacy data configuration detected (training.data_dir / data.{dataset_name,remote_name,"
+            "split_ratio,shard_size,tokenized_data}). These still work but are deprecated; migrate to the "
+            "manifest-backed layout: run `python scripts/data.py migrate-legacy --data-dir <dir> "
+            "--manifest <dir>/manifest.json`, then set data.manifest_path. See docs/data-pipeline.md.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
     def validate(self) -> None:
         _require(
@@ -313,7 +403,90 @@ class ConfigHandler:
         _require(self.peft.r > 0, "peft.r must be positive")
         _require(self.checkpointing.save_every_steps > 0, "checkpointing.save_every_steps must be positive")
         _require(self.checkpointing.save_total_limit > 0, "checkpointing.save_total_limit must be positive")
+        self._validate_data()
         self._reject_unimplemented()
+
+    def _validate_data(self) -> None:
+        """Validate the orthogonal data sub-sections and their cross-section combinations."""
+        materialization = self.data.materialization
+        sampling = self.data.sampling
+        transform = self.data.transform
+        validation = self.data.validation
+        source = self.data.source
+
+        _require(
+            materialization.mode in {"prepared", "prefetch", "direct"},
+            "data.materialization.mode must be prepared, prefetch, or direct",
+        )
+        _require(
+            sampling.exhaustion in {"stop", "repeat", "wait"},
+            "data.sampling.exhaustion must be stop, repeat, or wait",
+        )
+        _require(sampling.shuffle in {"none", "shard"}, "data.sampling.shuffle must be none or shard")
+        _require(transform.packing == "contiguous", "data.transform.packing only supports 'contiguous'")
+        _require(
+            transform.dtype in {"uint16", "uint32", "int32"},
+            "data.transform.dtype must be uint16, uint32, or int32",
+        )
+        _require(materialization.prefetch_shards > 0, "data.materialization.prefetch_shards must be positive")
+        _require(materialization.min_ready_shards > 0, "data.materialization.min_ready_shards must be positive")
+        _require(materialization.tokenizer_workers >= 1, "data.materialization.tokenizer_workers must be >= 1")
+
+        # dtype must hold the vocabulary.
+        vocab = self.model.vocab_size or self.training.vocab_size
+        if transform.dtype == "uint16" and vocab is not None:
+            _require(vocab < 65536, f"data.transform.dtype=uint16 cannot hold vocab_size={vocab} (>= 65536)")
+
+        # exactly one of validation.tokens / validation.shards when generating validation.
+        if validation.manifest_path is None and (validation.tokens is not None or validation.shards is not None):
+            _require(
+                (validation.tokens is None) != (validation.shards is None),
+                "set exactly one of data.validation.tokens or data.validation.shards (not both)",
+            )
+
+        # max_tokens must fit at least one full optimizer step.
+        if self.training.max_tokens is not None:
+            tokens_per_step = self.training.batch_size * self.training.seq_len * self.training.n_batches
+            _require(
+                self.training.max_tokens >= tokens_per_step,
+                f"training.max_tokens={self.training.max_tokens} is smaller than one optimizer step "
+                f"({tokens_per_step} tokens). Raise max_tokens or lower batch_size/seq_len/n_batches.",
+            )
+
+        # The combination rules below only constrain genuinely new-style pretraining configs.
+        if self.training.mode in {"finetune", "sft"} or getattr(self, "_data_is_legacy", False):
+            return
+        if materialization.mode == "prefetch":
+            _require(
+                source.type == "huggingface" and bool(source.dataset_name),
+                "data.materialization.mode=prefetch requires a materializable data.source "
+                "(type=huggingface with a dataset_name)",
+            )
+        if materialization.mode == "direct":
+            _require(
+                source.type == "huggingface" and bool(source.dataset_name),
+                "data.materialization.mode=direct requires a Hugging Face data.source",
+            )
+            _require(
+                validation.manifest_path is not None,
+                "data.materialization.mode=direct requires fixed validation: set data.validation.manifest_path",
+            )
+            _require(
+                self.training.num_workers == 0,
+                "direct mode requires training.num_workers=0 (single-process, no buffered prefetch)",
+            )
+            _require(
+                self.distributed.backend == "none",
+                "direct mode does not support a distributed backend; set distributed.backend=none",
+            )
+            _require(sampling.shuffle == "none", "direct mode does not support buffered shuffle; set shuffle=none")
+            _require(sampling.exhaustion != "wait", "direct mode cannot use exhaustion=wait (no shard producer)")
+        if sampling.exhaustion == "wait":
+            _require(
+                materialization.mode == "prefetch" or materialization.external_producer,
+                "data.sampling.exhaustion=wait requires materialization.mode=prefetch or "
+                "materialization.external_producer=true (a producer must be appending shards)",
+            )
 
     def _reject_unimplemented(self) -> None:
         """Reject options the engine validates but does not yet implement.
@@ -367,6 +540,39 @@ _SECTION_TYPES = {
     "finetune": FineTuneConfig,
     "inference": InferenceConfig,
 }
+
+
+def _nested_dataclass_type(field_obj):
+    """Return the nested dataclass type for a field built via ``field(default_factory=SomeDataclass)``."""
+    factory = field_obj.default_factory
+    if factory is not MISSING and isinstance(factory, type) and is_dataclass(factory):
+        return factory
+    return None
+
+
+def _build_dataclass(cls, data, key_path: str):
+    """Recursively construct ``cls`` from ``data``, rejecting unknown keys at every nesting level.
+
+    Error messages carry the full key path (e.g. ``cfg.yaml: section 'data'.materialization``) so a
+    typo deep in a nested section is easy to locate. Nested dataclasses are detected by their
+    ``field(default_factory=...)`` being a dataclass type.
+    """
+    if not isinstance(data, dict):
+        raise ConfigError(f"{key_path} must be a mapping, got {type(data).__name__}")
+    valid = {f.name for f in fields(cls)}
+    bad = sorted(set(data) - valid)
+    if bad:
+        raise ConfigError(f"{key_path}: unknown key(s) {bad}. Valid keys: {sorted(valid)}")
+    kwargs = {}
+    for f in fields(cls):
+        if f.name not in data:
+            continue
+        nested_cls = _nested_dataclass_type(f)
+        if nested_cls is not None:
+            kwargs[f.name] = _build_dataclass(nested_cls, data[f.name], f"{key_path}.{f.name}")
+        else:
+            kwargs[f.name] = data[f.name]
+    return cls(**kwargs)
 
 
 def _load_yaml(filepath: str) -> dict:
