@@ -1,3 +1,0 @@
-step,max_iter,loss,lr,grad_norm,tokens_per_sec,tokens_seen,unique_tokens_seen,repeated_tokens_seen,val_loss,val_perplexity,iter_time_ms,elapsed_s,eta_s,mfu,peak_mem_bytes,peak_mem_reserved_bytes,resumed,data_mode,dataset_id,dataset_fingerprint,manifest_generation,current_shard_id,data_pass,data_wait_s,source_records_consumed
-1,2,10.818359375,0.0006,2.392979145050049,140.47305979755407,64,64,0,10.591796875,39806.953019625355,455.60337400092976,0.4556089619982231,0.4556089619982231,,102604800,132120576,False,prepared,,,,train_000.txt,0,0.0,
-2,2,10.7998046875,0.0006,2.2690351009368896,469.03658639898225,128,128,0,10.4873046875,35857.3801763267,136.4499099981913,0.5920574939991639,0.0,,102604800,134217728,False,prepared,,,,train_000.txt,0,0.0,
