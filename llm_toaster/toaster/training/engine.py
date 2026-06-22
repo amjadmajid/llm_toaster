@@ -6,6 +6,7 @@ import logging
 import math
 import random
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -34,6 +35,14 @@ from .metrics import (
 from .optim import build_optimizer, build_scheduler
 
 logger = logging.getLogger(__name__)
+
+
+class ResumeCheckpointNotFoundError(FileNotFoundError):
+    """Resume was requested (e.g. ``trainer.py -ct``) but the checkpoint file is absent.
+
+    Carries an actionable message; the CLI (``trainer.py``) catches it to exit cleanly
+    rather than dumping a traceback.
+    """
 
 
 class TrainingEngine:
@@ -452,9 +461,46 @@ class TrainingEngine:
 
     def _resume_if_requested(self) -> None:
         checkpoint = self.config.checkpointing.resume_from_checkpoint
-        if checkpoint:
+        if not checkpoint:
+            return
+        if Path(checkpoint).exists():
             self.load_checkpoint(checkpoint)
             self.resumed = True
+            return
+        self._handle_missing_resume_checkpoint(checkpoint)
+
+    @staticmethod
+    def _stdin_is_interactive() -> bool:
+        """True only when stdin can answer a prompt. False in Colab ``!python`` cells, CI,
+        pytest capture, or nohup -- where ``input()`` raises instead of blocking for an answer."""
+        try:
+            return bool(sys.stdin) and sys.stdin.isatty()
+        except (ValueError, OSError):
+            return False
+
+    def _handle_missing_resume_checkpoint(self, checkpoint: str) -> None:
+        """Resume was requested but the checkpoint isn't there.
+
+        Common on the very first run, or on a fresh Colab VM whose earlier session never
+        reached the first save. Always warn. On an interactive terminal, offer to start fresh;
+        otherwise raise so the CLI exits with an actionable message instead of silently
+        restarting a long run the user thought they were resuming.
+        """
+        logger.warning(
+            "Resume requested but no checkpoint exists at %s. This is expected on the first run, "
+            "or on a fresh Colab VM whose earlier session never reached the first save.",
+            checkpoint,
+        )
+        if self._stdin_is_interactive():
+            reply = input(f"Start a fresh run (no resume) and create {checkpoint} at the first save? [y/N] ")
+            if reply.strip().lower() in {"y", "yes"}:
+                logger.warning("Starting a fresh run; %s will be written at the first save.", checkpoint)
+                return
+        raise ResumeCheckpointNotFoundError(
+            f"No checkpoint to resume from at {checkpoint}. To start fresh, re-run without -ct "
+            f"(or clear checkpointing.resume_from_checkpoint); the checkpoint is created at the first "
+            f"save. To resume instead, point the resume path at a checkpoint that already exists."
+        )
 
     def _maybe_evaluate(self) -> float | None:
         if self.val_loader is None:

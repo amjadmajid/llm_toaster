@@ -4,6 +4,7 @@ import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import torch
@@ -14,7 +15,7 @@ from llm_toaster.toaster.generation import generate
 from llm_toaster.toaster.models.registry import build_model
 from llm_toaster.toaster.peft.lora import inject_lora
 from llm_toaster.toaster.training.checkpointing import load_checkpoint, save_checkpoint
-from llm_toaster.toaster.training.engine import TrainingEngine
+from llm_toaster.toaster.training.engine import ResumeCheckpointNotFoundError, TrainingEngine
 from llm_toaster.toaster.training.optim import build_optimizer, build_scheduler
 
 
@@ -142,6 +143,45 @@ class EngineTrainingTests(unittest.TestCase):
             resumed.load_checkpoint(path)
             self.assertEqual(resumed.global_step, engine.global_step)
             self.assertEqual(resumed.tokens_seen, engine.tokens_seen)
+
+
+class ResumeMissingCheckpointTests(unittest.TestCase):
+    """`-ct` (resume) when the checkpoint is absent -- e.g. the first run, or a fresh Colab VM
+    whose previous session never reached the first save. It must not crash with a bare traceback
+    nor silently restart a long run."""
+
+    def _engine_resuming_from_missing(self, td):
+        engine, cfg = _tiny_engine(td)
+        cfg.checkpointing.resume_from_checkpoint = os.path.join(td, "does_not_exist")
+        return engine
+
+    @mock.patch.object(TrainingEngine, "_stdin_is_interactive", return_value=False)
+    def test_non_interactive_run_aborts_with_clear_error(self, _isatty):
+        # No tty (Colab !python, CI): raise the dedicated, actionable error -- never resume.
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine_resuming_from_missing(td)
+            with self.assertRaises(ResumeCheckpointNotFoundError) as cm:
+                engine._resume_if_requested()
+            self.assertIn("does_not_exist", str(cm.exception))
+            self.assertFalse(engine.resumed)
+
+    @mock.patch("builtins.input", return_value="y")
+    @mock.patch.object(TrainingEngine, "_stdin_is_interactive", return_value=True)
+    def test_interactive_yes_starts_fresh(self, _isatty, _input):
+        # Interactive terminal + "y": warn and start fresh, no raise, nothing marked resumed.
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine_resuming_from_missing(td)
+            engine._resume_if_requested()
+            self.assertFalse(engine.resumed)
+
+    @mock.patch("builtins.input", return_value="")
+    @mock.patch.object(TrainingEngine, "_stdin_is_interactive", return_value=True)
+    def test_interactive_decline_aborts(self, _isatty, _input):
+        # Default answer (empty == No) declines the fresh start and aborts.
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._engine_resuming_from_missing(td)
+            with self.assertRaises(ResumeCheckpointNotFoundError):
+                engine._resume_if_requested()
 
 
 class EmergencyCheckpointTests(unittest.TestCase):

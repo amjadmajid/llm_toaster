@@ -8,7 +8,7 @@ import logging
 import torch
 
 from llm_toaster.toaster.config import ConfigHandler
-from llm_toaster.toaster.training.engine import TrainingEngine
+from llm_toaster.toaster.training.engine import ResumeCheckpointNotFoundError, TrainingEngine
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,7 +28,11 @@ def main() -> None:
         config.checkpointing.resume_from_checkpoint = config.training.ckpt
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("high")
-    TrainingEngine(config).train()
+    try:
+        TrainingEngine(config).train()
+    except ResumeCheckpointNotFoundError as exc:
+        logging.error("%s", exc)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
