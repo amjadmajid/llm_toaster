@@ -18,8 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavy, only needed by the Hugging Face download/tokenize pipeline.
-data = ["datasets>=2.0", "tqdm>=4.0"]
+# Heavy + optional; imported lazily for source streaming (prepare / prefetch / direct modes).
+# Lower bound is 2.19 for the resumable IterableDataset state API (state_dict/load_state_dict),
+# used by direct-mode resume; prepared/prefetch only need streaming, which works on older releases.
+data = ["datasets>=2.19"]
 # Hugging Face tokenizer backend (tokenizer.type: hf).
 hf = ["transformers>=4.0"]
 # Pareto plots in scripts/aggregate.py --plot.

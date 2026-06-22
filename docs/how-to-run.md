@@ -60,29 +60,37 @@ pytest -q     # if you installed ".[dev]"
 
 ### 0.3 Get training data
 
-Real pretraining reads tokenized `.npy` shards. Build them once (needs internet + `".[data]"`):
+Real pretraining reads **immutable, manifest-described token shards**. There are three modes
+(full detail in [`docs/data-pipeline.md`](data-pipeline.md)):
+
+- **prepared** (default, most reproducible): materialize shards once, then train.
+- **prefetch** (Colab/spot/limited disk): a background producer streams + tokenizes shards ahead
+  of the trainer; no full download.
+- **direct** (experimental): tokenize in-process, no train shards.
+
+Build a prepared dataset once (needs internet + `".[data]"`). The config's `data:` section
+describes the source/transform/store; `prepare` streams the source while writing shards:
 
 ```bash
-python dataspace/src/download_tokenize_hf.py     # tokenizes ALL of fineweb-edu into dataspace/fineweb/*.npy
+python scripts/data.py prepare --config config/default_config.yaml --dry-run   # plan: tokens, shards, storage, steps
+python scripts/data.py prepare --config config/default_config.yaml             # materialize the shards
+python scripts/data.py inspect  --manifest dataspace/fineweb/manifest.json     # summary
 ```
 
-The full `sample-10BT` is far too large for Colab or a quick experiment. To pull only a small slice,
-**stream** the dataset and cap the shard count (optionally choosing where they land and how big):
+Re-running `prepare` is **append-safe** (it never overwrites a sealed shard). Choose a token budget
+in the config (`training.max_tokens` or `max_iter`) so `prepare` materializes only what you need —
+`--dry-run` shows the projected shard count and storage. Point `data.materialization.store_dir`
+(and `data.manifest_path`) at persistent storage so shards survive disconnects.
 
-```bash
-# Stream a few shards (no full download). --output-dir / --shard-size override the data-config defaults.
-python dataspace/src/download_tokenize_hf.py --stream --max-shards 4
-python dataspace/src/download_tokenize_hf.py --stream --max-shards 4 \
-  --output-dir /content/drive/MyDrive/llm_toaster_runs/fineweb --shard-size 10_000_000
-```
+For Colab / limited disk, skip the upfront download and use **prefetch** (`data.materialization.mode:
+prefetch`): training starts as soon as `min_ready_shards` are sealed and the producer keeps a bounded
+queue ahead of you (§2).
 
-`--stream` (datasets `streaming=True`) downloads only as much as it writes; `--max-shards N` stops after
-N shards (use N≥2 so one is carved off for validation). Point `--output-dir` at persistent storage so the
-shards survive disconnects, then set `training.data_dir` to that directory.
-
-For offline/airgapped nodes (HPC), do this on a node *with* internet and copy the shards over (see §5).
-Tiny `.txt`/`.tokens` fixtures under `tests/fixtures/tokenized_data/` let you exercise the full
-pipeline with no download.
+For offline/airgapped nodes (HPC), `prepare` on a node *with* internet and copy the shard store over
+(see §5), or use a **local** source (`source.type: local`, `dataset_name: path/to/corpus.txt`) which
+needs no network. Tiny `.txt` fixtures under `tests/fixtures/tokenized_data/` still exercise the
+legacy directory path with no download; migrate an existing shard directory with
+`python scripts/data.py migrate-legacy --data-dir <dir> --manifest <dir>/manifest.json`.
 
 ### 0.4 Pick device & precision
 
@@ -129,7 +137,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install -e ".[data,viz]"
 python -c "import torch; print(torch.cuda.get_device_name(0))"
 
-python dataspace/src/download_tokenize_hf.py          # one-time data prep
+python scripts/data.py prepare --config config/default_config.yaml   # one-time data prep (manifest + shards)
 python trainer.py --config config/default_config.yaml --mode pretrain
 python trainer.py -ct                                 # resume after any stop
 ```
@@ -188,36 +196,54 @@ from google.colab import drive; drive.mount('/content/drive')
 # Cell 2 — install (Colab already has a CUDA torch; DON'T reinstall torch)
 !pip install -e ".[data,viz]" -q
 import torch; print(torch.cuda.get_device_name(0))
+!python trainer.py --config config/smoke_test_config.yaml --mode pretrain    # quick CPU/GPU smoke
 
-# Cell 3 — smoke check, stream a small data slice to Drive, then train.
-#          On a free T4 use fp16 (no bf16 tensor cores). See the Appendix for the YAML.
-!python trainer.py --config config/smoke_test_config.yaml --mode pretrain    # quick check
-
-# Stream a few shards of fineweb-edu straight to Drive (no 10BT download; survives disconnects):
-!python dataspace/src/download_tokenize_hf.py --stream --max-shards 4 \
-  --output-dir /content/drive/MyDrive/llm_toaster_runs/fineweb
-
-# Build my_config.yaml on Drive once: repo default config + the Appendix's T4/Drive overrides.
+# Cell 3 — build my_config.yaml on Drive (token budget + prefetch + T4 fp16). Choose a budget you
+#          can finish/resume across sessions; prefetch streams shards to Drive as you train.
 import yaml, pathlib
 RUN = "/content/drive/MyDrive/llm_toaster_runs"
-pathlib.Path(RUN, "fineweb").mkdir(parents=True, exist_ok=True)
+pathlib.Path(RUN).mkdir(parents=True, exist_ok=True)
 cfg = yaml.safe_load(open("config/default_config.yaml"))
 cfg["training"].update(device="cuda", batch_size=4, n_batches=8,
-                       data_dir=f"{RUN}/fineweb", ckpt=f"{RUN}/base_ckpt", ckpt_config=f"{RUN}/base_config.yaml")
-cfg["distributed"]   = {"mixed_precision": "fp16"}
+                       max_tokens=200_000_000,        # ~200M tokens this study
+                       ckpt=f"{RUN}/base_ckpt", ckpt_config=f"{RUN}/base_config.yaml")
+cfg["distributed"]   = {"mixed_precision": "fp16"}    # free T4 has no bf16 tensor cores
 cfg["checkpointing"] = {"output_dir": RUN}
 cfg["logging"]       = {"log_file": f"{RUN}/train.log", "metrics_file": f"{RUN}/metrics.jsonl"}
+cfg["data"]["manifest_path"] = f"{RUN}/fineweb/manifest.json"
+cfg["data"]["materialization"].update(mode="prefetch", store_dir=f"{RUN}/fineweb",
+                                       prefetch_shards=3, min_ready_shards=1)
+cfg["data"]["sampling"]["exhaustion"] = "wait"        # wait for the producer to seal more shards
+cfg["data"]["validation"] = {"tokens": 10_000_000}    # fixed, frozen before training
 yaml.safe_dump(cfg, open(f"{RUN}/my_config.yaml", "w"), sort_keys=False)
 
+# Cell 4 — train. The background producer streams fineweb-edu, seals immutable shards to Drive, and
+#          keeps ~3 shards ahead; the trainer consumes them. No 10BT pre-download.
 !python trainer.py --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml --mode pretrain
 
-# Cell 4 — after a disconnect, reconnect, re-run Cells 1–2, then resume:
+# Cell 5 — after a disconnect, reconnect, re-run Cells 1–2, then resume (both trainer AND producer
+#          resume from their own checkpoints; the manifest is append-safe):
 !python trainer.py --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml -ct
+
+# Cell 6 — inspect producer/manifest status and disk usage any time:
+!python scripts/data.py inspect --manifest /content/drive/MyDrive/llm_toaster_runs/fineweb/manifest.json
+!cat /content/drive/MyDrive/llm_toaster_runs/fineweb/.producer_status.json
+!du -sh /content/drive/MyDrive/llm_toaster_runs/fineweb
 ```
 
-Tips: **Runtime → Change runtime type → GPU**; set `checkpointing.output_dir`, `training.ckpt`,
-`training.ckpt_config`, `training.data_dir`, and `logging.*` to a Drive path; choose a token budget you
-can finish in one session (`training.max_iter`) and rely on `-ct` to continue across sessions. Free T4 → `fp16`.
+**Prefer fully reproducible runs?** Use **prepared** instead: set `materialization.mode: prepared`
+and `sampling.exhaustion: stop`, then materialize once before training:
+
+```python
+!python scripts/data.py prepare --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml --dry-run
+!python scripts/data.py prepare --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml
+!python trainer.py --config /content/drive/MyDrive/llm_toaster_runs/my_config.yaml --mode pretrain
+```
+
+Tips: **Runtime → Change runtime type → GPU**; keep `checkpointing.output_dir`, `training.ckpt`,
+`data.materialization.store_dir`, and `logging.*` on Drive; pick a `training.max_tokens` you can
+finish/resume across sessions and rely on `-ct`. Free T4 → `fp16`. Prefetch means you no longer
+pre-download four shards and then run a 100k-step job over them — the producer keeps feeding shards.
 
 ---
 
@@ -233,7 +259,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
 pip install torch --index-url https://download.pytorch.org/whl/cu124   # or reuse Lambda Stack's torch
 pip install -e ".[data,viz]"
-python dataspace/src/download_tokenize_hf.py        # or rsync pre-tokenized shards to the persistent volume
+python scripts/data.py prepare --config config/default_config.yaml   # or rsync a pre-built shard store to the persistent volume
 
 tmux new -s train       # survives SSH drops
 python trainer.py --config config/default_config.yaml --mode pretrain
@@ -318,7 +344,7 @@ pip install -e ".[data,viz]"
 # Stage data + tokenizer caches onto $WORK so OFFLINE compute nodes can use them:
 export TIKTOKEN_CACHE_DIR="$WORK/.cache/tiktoken"; mkdir -p "$TIKTOKEN_CACHE_DIR"
 python -c "import tiktoken; tiktoken.get_encoding('gpt2').encode('warm cache')"   # caches the real GPT-2 BPE
-python dataspace/src/download_tokenize_hf.py     # writes dataspace/fineweb/*.npy (move to $SCRATCH for speed if desired)
+python scripts/data.py prepare --config config/default_config.yaml   # writes dataspace/fineweb/{manifest.json,shards/} (move to $SCRATCH for speed if desired)
 ```
 
 > Without the warmed `TIKTOKEN_CACHE_DIR`, offline nodes silently fall back to a byte-level tokenizer —
@@ -432,8 +458,8 @@ and throughput are measured everywhere. See [`docs/running_sweeps.md`](running_s
 | CUDA out of memory | Lower `training.batch_size` and/or `training.seq_len`; raise `training.n_batches` to keep the token budget. |
 | `NaN`/`inf` loss | fp16 instability → switch to `bf16`, or lower `optimizer.lr` / warm up longer. |
 | Tokenizer outputs look byte-level / vocab tiny | tiktoken couldn't fetch GPT-2 assets (offline). Warm `TIKTOKEN_CACHE_DIR` on a node with internet (§5.1). |
-| HF `datasets` fails offline (HPC) | Pre-tokenize on a login node; copy `dataspace/fineweb/*.npy` to the compute filesystem. |
-| Tokenizing fills the disk / runs for hours | Default tokenizes all of `sample-10BT`. Stream a slice: `--stream --max-shards N` (§0.3). |
+| HF `datasets` fails offline (HPC) | `prepare` on a login node; copy the shard store (`manifest.json` + `shards/`) to the compute filesystem, or use a `local` source. |
+| Tokenizing fills the disk / runs for hours | Set a token budget (`training.max_tokens`) and check `scripts/data.py prepare --dry-run`; or use `materialization.mode: prefetch` to keep only a bounded shard queue (§0.3, §2). |
 | macOS: "op not implemented for MPS" | `export PYTORCH_ENABLE_MPS_FALLBACK=1`; keep `mixed_precision: no` and `compile: false`. |
 | `peak_mem_bytes` / `mfu` / energy are 0 / null | Expected off NVIDIA-CUDA / Jetson; quality + decode tok/s are still valid. |
 | Run died (spot reclaim / SLURM time / Ctrl-C) | An `emergency.pt` was saved; resume with `python trainer.py -ct` (re-sync from S3/Drive/`$WORK` first). |
@@ -453,7 +479,7 @@ training:
   device: cuda
   batch_size: 4
   n_batches: 8
-  data_dir: /content/drive/MyDrive/llm_toaster_runs/fineweb   # shards streamed in §0.3 / Cell 3
+  max_tokens: 200_000_000
   ckpt: /content/drive/MyDrive/llm_toaster_runs/base_ckpt
   ckpt_config: /content/drive/MyDrive/llm_toaster_runs/base_config.yaml
 distributed:
@@ -463,6 +489,11 @@ checkpointing:
 logging:
   log_file: /content/drive/MyDrive/llm_toaster_runs/train.log
   metrics_file: /content/drive/MyDrive/llm_toaster_runs/metrics.jsonl
+data:
+  manifest_path: /content/drive/MyDrive/llm_toaster_runs/fineweb/manifest.json
+  materialization: { mode: prefetch, store_dir: /content/drive/MyDrive/llm_toaster_runs/fineweb }
+  sampling: { exhaustion: wait }
+  validation: { tokens: 10_000_000 }
 ```
 
 **Apple Silicon (MPS) — fp32:**

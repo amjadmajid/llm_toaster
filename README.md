@@ -59,12 +59,20 @@ dataflow + decoder-block diagrams and a per-component parameter table with exact
 (matched-parameter training → Pareto table → on-device measurement).
 
 ## Training
-### Step 1) data download and tokenization
-First install the data extra: `pip install -e ".[data]"`. Then, from the repository root, run:
+### Step 1) data: materialize token shards
+Pretraining reads **immutable, manifest-described token shards**. Install the data extra
+(`pip install -e ".[data]"`), then materialize a dataset described by your config's `data:` section
+(streams the source while writing shards; **append-safe** to re-run):
 ```bash
-python dataspace/src/download_tokenize_hf.py
+python scripts/data.py prepare --config config/default_config.yaml --dry-run   # plan: tokens, shards, storage, steps
+python scripts/data.py prepare --config config/default_config.yaml             # write manifest.json + shards/
+python scripts/data.py inspect  --manifest dataspace/fineweb/manifest.json
 ```
-This downloads and tokenizes about 27GB (reduced to about 10GB after tokenization). The script resolves output paths from the repo root, so shards always land in `dataspace/fineweb/` regardless of the directory you run it from.
+Pick a token budget in the config (`training.max_tokens` or `max_iter`) so you materialize only what
+you need. For Colab / limited disk, set `data.materialization.mode: prefetch` to stream shards in the
+background **during** training instead of downloading upfront. Already have loose `.npy` shards?
+Migrate them once (no retokenize): `python scripts/data.py migrate-legacy --data-dir dataspace/fineweb
+--manifest dataspace/fineweb/manifest.json`. Full guide: [`docs/data-pipeline.md`](docs/data-pipeline.md).
 
 ### Step 2) Training
 To train the model, navigate to the `llm_toaster` directory and run:
@@ -99,7 +107,7 @@ either an extracted `.llm` state_dict or a full training checkpoint.
 If you encounter any issues, please check the following:
 - Ensure all dependencies are installed.
 - Verify the configuration in `config/default_config.yaml`.
-- Make sure the dataset is downloaded and tokenized correctly (shards in `dataspace/fineweb/`).
+- Make sure data is materialized: `python scripts/data.py validate --manifest dataspace/fineweb/manifest.json`.
 
 ## Contributing
 Contributions are welcome! Please fork the repository and submit a pull request with your improvements or bug fixes.

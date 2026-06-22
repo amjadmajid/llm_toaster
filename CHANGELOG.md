@@ -3,6 +3,64 @@
 Reliability hardening for small-LM architecture-comparison experiments. Worked in small,
 checked stages (see `docs`/plan). Each entry records what changed, why, and how it was verified.
 
+## Manifest-backed data pipeline
+
+**What changed**
+- New canonical pretraining data format: **immutable, pretokenized token shards described by a
+  versioned, append-only JSON manifest** (`llm_toaster/toaster/data/`). Acquisition is now a policy
+  on top of one format, with three user-facing modes:
+  - `prepared` (default) — materialize shards before training (`scripts/data.py prepare`);
+  - `prefetch` — a background producer streams + tokenizes + atomically publishes shards ahead of a
+    wait-mode trainer (recommended for Colab/spot/limited disk);
+  - `direct` — experimental in-process HF streaming (single process, `num_workers=0`, no buffered
+    shuffle; validation still from a fixed manifest).
+- `PretrainBatchSource` protocol so `TrainingEngine` is decoupled from acquisition. Implementations:
+  `ManifestShardSource` (mmap, exhaustion `stop`/`repeat`/`wait`, manifest-refresh discovery of
+  appended shards, exact-next-batch resume), `HFDirectTokenSource`, and a deprecated
+  `LegacyShardDirSource` compatibility adapter.
+- Atomic shard publication (`.partial` → `fsync` → checksum → `os.replace` → append entry → publish
+  manifest), single-writer lock, orphan reclaim; manifest separates an immutable
+  `dataset_fingerprint` from a mutable append `generation`, with deterministic canonical-JSON hashing
+  and contextual validation (full key paths).
+- Background producer + `PrefetchCoordinator` (spawn subprocess, CUDA-safe): validation materialized
+  first and frozen, bounded queue (`prefetch_shards`) via a consumer cursor, atomic producer
+  checkpoint per sealed shard, crash-safe restart (regenerate the partial shard, never duplicate a
+  committed one), `failed` status surfaced (never an infinite wait).
+- Engine: `training.max_tokens` (stop at `min(max_iter, max_tokens)` on full-step boundaries; a
+  `DataExhausted` mid gradient-accumulation discards the partial step cleanly — no optimizer/global-
+  step advance, no token counting — and saves a final checkpoint); explicit exhaustion semantics
+  (no silent modulo wrapping); fixed validation reset before each eval (under autocast, train cursor
+  untouched); resume verifies dataset identity/revision/tokenizer/transform/shard-checksum/manifest-
+  prefix; new metrics (`data_mode`, `dataset_id`, `dataset_fingerprint`, `manifest_generation`,
+  `current_shard_id`, `data_pass`, `unique_tokens_seen`, `repeated_tokens_seen`, `producer_status`)
+  and a startup data summary.
+- Config: orthogonal nested `data.{source,transform,materialization,sampling,validation}` with a
+  recursive parser (unknown-key rejection + full key paths), plus combination validation
+  (prefetch/direct/wait/dtype-vs-vocab/validation-tokens-xor-shards). Legacy fields
+  (`training.data_dir`, `data.{dataset_name,remote_name,split_ratio,shard_size,tokenized_data}`) still
+  work behind **one** deprecation warning and route to `LegacyShardDirSource`.
+- Tooling: `scripts/data.py {prepare,inspect,validate,migrate-legacy}` (prepare reuses the producer;
+  dry-run plan; migrate registers existing shards without retokenizing). `download_tokenize_hf.py`
+  is now a thin, append-safe wrapper delegating to `prepare` (its `--stream` means *source* streaming
+  during materialization, not trainer-time streaming).
+
+**Why**
+- The old path listed shard files once, advanced with modulo arithmetic (silently repeating a small
+  dataset), never discovered shards added mid-run, could overwrite shards on re-run, derived a
+  misleading validation proportion from a tiny shard count, advanced the validation cursor between
+  evals, and persisted only a numeric shard index/offset with no dataset/tokenizer/transform identity
+  on resume. The manifest pipeline makes repetition explicit, validation fixed, and resume verified.
+
+**Verified**
+- `pytest -q` (offline, CPU-only): full suite green incl. new manifest/shard-store/source/producer/
+  coordinator/CLI/engine-data-mode tests and a prefetch end-to-end smoke over a local source.
+- `ruff check .`, `ruff format --check .`, `python -m compileall llm_toaster dataspace scripts` clean.
+
+**Dependencies**
+- `datasets` stays optional + lazily imported; lower bound raised to `>=2.19` (resumable
+  IterableDataset state API, used by direct-mode resume). Unused `tqdm` dropped from the `data` extra.
+  A `local` source (`source.type: local`) needs no extra dependency and keeps prepare/prefetch offline.
+
 ## Stage 1 — Package / import hygiene
 
 **What changed**

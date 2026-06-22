@@ -43,8 +43,13 @@ python trainer.py --config config/default_config.yaml --mode finetune
 python inference.py -p "Your prompt" --config model/babyGPT/babyGPT_base.yaml --model model/babyGPT/babyGPT_base.llm
 python scripts/generate.py --config config/default_config.yaml --prompt "Hello"
 
-# Dataset download + tokenization (fineweb-edu from HF)
-python dataspace/src/download_tokenize_hf.py
+# Data: materialize manifest-backed token shards (see docs/data-pipeline.md)
+python scripts/data.py prepare --config config/default_config.yaml --dry-run   # plan only
+python scripts/data.py prepare --config config/default_config.yaml             # write manifest + shards
+python scripts/data.py inspect  --manifest dataspace/fineweb/manifest.json
+python scripts/data.py validate --manifest dataspace/fineweb/manifest.json
+python scripts/data.py migrate-legacy --data-dir <old_dir> --manifest <old_dir>/manifest.json
+# (legacy `python dataspace/src/download_tokenize_hf.py` still works as a thin wrapper around prepare)
 ```
 
 CI lives in `.github/workflows/ci.yml`: a lint job (`ruff check` + `ruff format --check`,
@@ -71,15 +76,21 @@ The repo deliberately keeps two import paths alive. Know which one you are editi
      `training/optim.py` (`build_optimizer`/`build_scheduler`).
    - `models/` — `registry.build_model(config)` dispatches on `model.architecture`; pieces
      are `attention.py`, `feedforward.py`, `norms.py`, `transformer.py`.
-   - `data/adapters.py` — `DataAdapterRegistry` + `JsonlSFTDataLoader` (SFT).
+   - `data/` — manifest-backed pretraining pipeline (canonical): `protocol.py`
+     (`PretrainBatchSource`), `manifest.py`, `shard_store.py`, `packing.py`, `shard_source.py`
+     (`ManifestShardSource`), `producer.py`/`coordinator.py` (prefetch), `hf_source.py`/
+     `document_streams.py`, `legacy.py` (deprecated dir adapter + migration), `cli.py`, `sources.py`
+     (engine factory). `data/adapters.py` — `DataAdapterRegistry` + `JsonlSFTDataLoader` (SFT;
+     intentionally NOT routed through `PretrainBatchSource`). See `docs/data-pipeline.md`.
    - `peft/lora.py` — `inject_lora`, `lora_state_dict`. `tokenizers.py` — `build_tokenizer`.
 
 2. **Legacy top-level packages** (still used for data prep and config re-export):
    - `config/` — re-exports the engine schema (`from llm_toaster.toaster.config.schema import *`),
      so `config.ConfigHandler` IS the engine config.
-   - `dataspace/src/data_loader.py` — `DataLoaderLite` (pretrain shard loader) and
-     `InstructionDataLoader`; `download_tokenize_hf.py` builds shards. `tokenizer_lib/functional.py`
-     provides the gpt2 `encode`/`decode` used by that offline tokenization pipeline.
+   - `dataspace/src/data_loader.py` — `DataLoaderLite` (legacy shard loader, still used directly by
+     a few tests) and `InstructionDataLoader`; `download_tokenize_hf.py` is now a thin wrapper around
+     `toaster.data.cli.prepare_from_config`. `tokenizer_lib/functional.py` provides the gpt2
+     `encode`/`decode` used by that offline tokenization pipeline.
    - `model/model.py` (`TransformerModel` positional-constructor shim) and `utils/utils.py`
      (`load_checkpoint_`, `save_model`) are **deprecated**: nothing in the repo imports them
      anymore, and `model/model.py` emits a `DeprecationWarning`. Build models via
@@ -116,8 +127,12 @@ newer version raises a clear error.
 
 `TrainingEngine.is_finetune_mode` is true when `training.mode in {finetune, sft}` or
 `finetune.enabled`. It selects the data path:
-- **pretrain** → `DataLoaderLite` over tokenized shards in `training.data_dir`
-  (`.npy`, or `.txt`/`.tokens` integer-token text shards used for fixtures).
+- **pretrain** → a `PretrainBatchSource` chosen by `data.materialization.mode`
+  (`prepared`/`prefetch` → `ManifestShardSource` over a manifest; `direct` → `HFDirectTokenSource`).
+  Old-style configs (`training.data_dir`, no manifest) fall back to the deprecated
+  `LegacyShardDirSource` with one deprecation warning. Exhaustion is explicit
+  (`data.sampling.exhaustion: stop|repeat|wait` — no silent wrapping); `training.max_tokens` caps
+  the token budget. See `docs/data-pipeline.md`.
 - **finetune/sft** → `JsonlSFTDataLoader` over `finetune.dataset_path`. Prompt tokens are
   masked to `-100` (loss on response only) unless `finetune.train_on_prompt: true`.
   `DataAdapterRegistry` auto-detects JSONL schemas: `text`, `prompt`/`completion`,
@@ -159,3 +174,12 @@ falls back to a byte-level encoder when tiktoken assets can't be downloaded.
   resume that restores trained weights exactly.
 - `tests/test_inference_roundtrip.py` — extract → load (`weights_only`) → `generate` over the
   unified path.
+- Data pipeline (all offline; fake tokenizer + local/fake sources, no network):
+  `tests/test_data_manifest.py` (manifest round-trip/hashing/append-only/validation + packing),
+  `tests/test_data_shard_store.py` (atomic publish/checksum/no-overwrite/lock),
+  `tests/test_data_sources.py` (prepared/wait/legacy/direct sources),
+  `tests/test_data_producer.py` (producer: validation frozen, bounded queue, restart, identical
+  sealed bytes, failure status; coordinator lifecycle via fork),
+  `tests/test_data_cli.py` (prepare/inspect/validate/migrate + legacy wrapper mapping),
+  `tests/test_engine_data_modes.py` (prepared + max_tokens + exhaustion-discard + fixed validation
+  + resume compatibility + a prefetch end-to-end smoke over a local source).

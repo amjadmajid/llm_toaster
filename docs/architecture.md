@@ -85,7 +85,7 @@ matters architecturally*.
 | **Warmup + cosine** | LR schedule | Linear warmup then cosine decay to `min_lr_ratio`. | Stabilises early training; standard for Transformers. |
 | **Gradient clipping** | grad-norm clip | Cap the global grad norm (currently fixed at 1.0). | Prevents loss spikes; a robustness guard. |
 | **Seed / determinism** | — | Seeding Python/NumPy/torch(+CUDA) RNGs. | Reproducibility — essential for paper claims. (Strict bitwise determinism is a roadmap item.) |
-| **Token budget** | — | Train to a target number of tokens, not epochs. | The fair way to compare architectures: equal data seen, not equal passes. (Currently step-based; `max_tokens` is a roadmap item.) |
+| **Token budget** | — | Train to a target number of tokens, not epochs. | The fair way to compare architectures: equal data seen, not equal passes. Set `training.max_tokens`; training stops at `min(max_iter, max_tokens)`. |
 
 ### Efficiency & evaluation metrics
 
@@ -133,8 +133,9 @@ The repo deliberately keeps two import paths alive — know which you are editin
 
 ```mermaid
 flowchart LR
-    raw[(HF dataset)] -->|download_tokenize_hf.py| shards[(tokenized .npy shards)]
-    shards --> engine
+    raw[(source: HF stream / local)] -->|prepare or prefetch producer| store[(manifest + immutable shards)]
+    store -->|ManifestShardSource| engine
+    raw -. direct experimental bypass .-> engine
     cfg[ConfigHandler<br/>YAML] --> engine[TrainingEngine.train]
     engine -->|checkpoints/| ckpt[(latest · best · step_* · emergency .pt)]
     engine -->|logs/| logs[(train.log · metrics.jsonl · metrics.csv)]
@@ -361,13 +362,32 @@ missing/corrupt/newer-format files (never swallows errors). `load_state_dict_any
 
 ## 7. Data pipeline
 
-### Pretraining — tokenized shards (`DataLoaderLite`)
+The canonical pretraining format is **immutable, manifest-described token shards**; acquisition
+(HF stream, prefetch, local cache) is a policy on top. Full detail in
+[`docs/data-pipeline.md`](data-pipeline.md). Layout under `llm_toaster/toaster/data/`:
+`protocol.py` (the `PretrainBatchSource` interface), `manifest.py` (versioned append-only manifest +
+canonical hashing), `shard_store.py` (atomic publish), `packing.py` (fingerprints + single-shift
+`make_batch`), `shard_source.py` (`ManifestShardSource`), `producer.py`/`coordinator.py` (prefetch),
+`hf_source.py`/`document_streams.py` (sources), `legacy.py` (deprecated dir adapter + migration),
+`cli.py` (`scripts/data.py`).
 
-`dataspace/src/data_loader.py` streams `.npy` token shards (or `.txt`/`.tokens` text shards for tiny
-fixtures). It yields `(x, y, shard)` where **labels are shifted exactly once**: `x = buf[:-1]`,
-`y = buf[1:]` (the trainer applies *no* second shift — next-token prediction `10→11, 11→12, …`). A
-`state_dict`/`load_state_dict` persist the read cursor (shard index + offset) so `-ct` resumes
-mid-dataset instead of restarting at shard 0.
+### Pretraining — manifest-backed sources
+
+The engine builds a `PretrainBatchSource` from `data.materialization.mode`:
+
+- **prepared / prefetch** → `ManifestShardSource` over the same manifest/shard contract. It
+  memory-maps `.npy` shards (releasing maps between shards), supports `.txt`/`.tokens` fixtures,
+  applies the exhaustion policy (`stop`/`repeat`/`wait`), and refreshes the **manifest** (never a
+  directory scan) to discover shards appended by a running producer.
+- **direct** (experimental) → `HFDirectTokenSource` tokenizes/packs HF records in-process.
+- **legacy config** → the deprecated `LegacyShardDirSource` reads an old shard directory unchanged
+  (one deprecation warning), preserved during migration.
+
+All sources yield `(x, y, info)` where **labels are shifted exactly once** in the shared
+`make_batch`: `x = buf[:-1]`, `y = buf[1:]` (the trainer applies *no* second shift). `info` is a
+`PretrainBatchInfo` (shard id, token offset, pass index, repeated flag) used for accounting. Resume
+restores the exact next batch and verifies dataset identity, source revision, tokenizer/transform
+fingerprints, the current shard checksum, and the committed manifest prefix.
 
 ### Fine-tuning — JSONL adapters (`data/adapters.py`)
 
@@ -517,7 +537,7 @@ its research reach. Effort/risk are rough (S/M/L).
 
 | Item | Why it matters | Effort/Risk |
 | --- | --- | --- |
-| **Token-budget training (`max_tokens`)** | The fair comparison axis is *tokens seen*, not steps. Stop on `min(max_iter, max_tokens)`. | S / Low |
+| ~~**Token-budget training (`max_tokens`)**~~ | ✅ Done — `training.max_tokens`; stops at `min(max_iter, max_tokens)` on full-step boundaries; `unique_tokens_seen`/`data_pass` tracked. | — |
 | **Time-based checkpointing (`checkpoint_interval_minutes`)** | Bounds data loss on wall-clock-limited jobs independent of step cadence. | S / Low |
 | **`gradient_accumulation_steps` alias** | Mirror the conventional name onto `n_batches` for readability. | S / Low |
 | **Optional TensorBoard / W&B sinks** | A `CompositeLogger` behind config flags (JSONL/CSV stay mandatory and offline). | M / Low |
