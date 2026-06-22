@@ -458,9 +458,9 @@ class ConfigHandler:
             return
         if materialization.mode == "prefetch":
             _require(
-                source.type == "huggingface" and bool(source.dataset_name),
+                source.type in {"huggingface", "local"} and bool(source.dataset_name),
                 "data.materialization.mode=prefetch requires a materializable data.source "
-                "(type=huggingface with a dataset_name)",
+                "(type=huggingface or local with a dataset_name)",
             )
         if materialization.mode == "direct":
             _require(

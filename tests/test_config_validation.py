@@ -199,6 +199,14 @@ class DataValidationRulesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfg.validate()
 
+    def test_prefetch_accepts_local_source(self):
+        cfg = ConfigHandler()
+        cfg.data.materialization.mode = "prefetch"
+        cfg.data.sampling.exhaustion = "wait"
+        cfg.data.source.type = "local"
+        cfg.data.source.dataset_name = "/tmp/corpus.txt"
+        cfg.validate()  # a local file is a materializable source for offline prefetch
+
     def test_direct_requires_fixed_validation_and_single_process(self):
         cfg = ConfigHandler()
         cfg.data.materialization.mode = "direct"
